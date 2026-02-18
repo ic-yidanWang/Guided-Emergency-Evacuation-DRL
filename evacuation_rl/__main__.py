@@ -1,29 +1,25 @@
 """
 Emergency Evacuation Deep Reinforcement Learning - Main Entry Point
 
-This is the main entry point for the refactored project.
+This is the main entry point for the project.
 
 Project Structure:
     evacuation_rl/
         ├── environments/       - Simulation environments (cellspace)
         ├── agents/
-        │   ├── smart_agents/   - Agents assuming everyone is smart
-        │   └── guided_agents/  - Agents with guide assistance (realistic)
+        │   └── guided_agents/  - Realistic agents with limited visibility
         └── utils/              - Visualization and utilities
 
 Usage:
-    Training smart agents (3 exits with obstacles):
-        python -m evacuation_rl.agents.smart_agents.train_3exits_obstacles
+    Run guided evacuation simulation:
+        python run_guided_visualize.py
     
-    Training smart agents (4 exits):
-        python -m evacuation_rl.agents.smart_agents.train_4exits
-    
-    Testing smart agents:
-        python -m evacuation_rl.agents.smart_agents.test
+    For help:
+        python -m evacuation_rl --help
 
-    For guided agents (future work):
-        python -m evacuation_rl.agents.guided_agents.train
-        python -m evacuation_rl.agents.guided_agents.test
+Note:
+    Smart agents code (theoretical baseline) has been archived.
+    See archive/README.md for details.
 """
 
 import sys
@@ -33,44 +29,55 @@ def print_usage():
     """Print usage information"""
     print("=" * 80)
     print("Emergency Evacuation Deep Reinforcement Learning")
-    print("Refactored PyTorch Implementation")
+    print("PyTorch Implementation")
     print("=" * 80)
     print()
     print("Project Structure:")
     print("  evacuation_rl/")
     print("    ├── environments/       - Simulation environments (cellspace)")
     print("    ├── agents/")
-    print("    │   ├── smart_agents/   - All agents are smart (know exits)")
-    print("    │   └── guided_agents/  - Realistic agents need guidance")
+    print("    │   └── guided_agents/  - Realistic agents with limited visibility")
     print("    └── utils/              - Visualization and utilities")
+    print()
+    print("  archive/                  - Deprecated smart agents code")
     print()
     print("=" * 80)
     print("Available Commands:")
     print("=" * 80)
     print()
-    print("SMART AGENTS (assumes everyone knows optimal exit):")
+    print("GUIDED EVACUATION SIMULATION:")
     print("-" * 80)
-    print("  Train 3-exits with obstacles:")
-    print("    python -m evacuation_rl.agents.smart_agents.train_3exits_obstacles")
+    print("  Run simulation with visualization:")
+    print("    python run_guided_visualize.py")
+    print("    uv run python run_guided_visualize.py")
     print()
-    print("  Train 4-exits:")
-    print("    python -m evacuation_rl.agents.smart_agents.train_4exits")
-    print()
-    print("  Test trained models:")
-    print("    python -m evacuation_rl.agents.smart_agents.test")
+    print("  Features:")
+    print("    - Distance-based exit visibility")
+    print("    - Crowd-following behavior")
+    print("    - Wall and obstacle detection")
+    print("    - Guide agents (stationary and mobile)")
     print()
     print("=" * 80)
-    print("GUIDED AGENTS (realistic scenario - coming soon):")
+    print("CONFIGURATION:")
     print("-" * 80)
-    print("  Only agents near exits know the way out")
-    print("  Other agents follow crowd behavior")
-    print("  Guide agents help direct evacuation")
+    print("  Edit files in config/ folder:")
+    print("    config/simulation_config.json")
+    print("    config/single_exit.json")
+    print("    config/with_obstacles.json")
+    print("    config/large_scale.json")
     print()
-    print("  Implementation in progress...")
+    print("=" * 80)
+    print("FUTURE WORK:")
+    print("-" * 80)
+    print("  Guide agent training using RL (in development)")
+    print("  Multi-agent coordination")
+    print("  Complex evacuation scenarios")
     print()
     print("=" * 80)
     print()
-    print("For more information, see README.md and documentation files")
+    print("For more information:")
+    print("  - README.md - Main documentation")
+    print("  - archive/README.md - Info on deprecated smart agents")
     print()
 
 
@@ -79,27 +86,12 @@ def main():
     if len(sys.argv) > 1:
         command = sys.argv[1]
         
-        if command == "train":
-            scenario = sys.argv[2] if len(sys.argv) > 2 else "4exits"
-            if scenario == "3exits":
-                from evacuation_rl.agents.smart_agents import train_3exits_obstacles
-                train_3exits_obstacles.main()
-            elif scenario == "4exits":
-                from evacuation_rl.agents.smart_agents import train_4exits
-                train_4exits.main()
-            else:
-                print(f"Unknown scenario: {scenario}")
-                print_usage()
-        
-        elif command == "test":
-            from evacuation_rl.agents.smart_agents import test
-            test.main()
-        
-        elif command == "help":
+        if command in ["help", "--help", "-h"]:
             print_usage()
         
         else:
             print(f"Unknown command: {command}")
+            print()
             print_usage()
     
     else:

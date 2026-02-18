@@ -88,10 +88,9 @@ Our model can efficiently handle modeling of emergency evacuation in complex env
 
 ## Key Features
 
-🎯 **Three Agent Types:**
-- **Smart Agents**: Assumes all agents know the nearest exit (theoretical benchmark)
-- **Guided Agents**: Realistic scenario with limited exit visibility and crowd-following (NEW)
-- **Guide Agents**: Stationary and mobile guides to direct evacuation (NEW)
+🎯 **Two Agent Types:**
+- **Evacuee Agents**: Realistic agents with limited exit visibility and crowd-following behavior
+- **Guide Agents**: Stationary and mobile guides to direct evacuation (framework ready for RL training)
 
 👁️ **Limited Exit Visibility System:**
 - Distance-based exit detection (realistic perception)
@@ -137,44 +136,30 @@ Emergency-evacuation-Deep-reinforcement-learning/
 │   │   └── cellspace.py             # Particle dynamics environment
 │   ├── agents/                       # Agent implementations
 │   │   ├── __init__.py
-│   │   ├── smart_agents/            # Smart agents (all know exits)
-│   │   │   ├── __init__.py
-│   │   │   ├── dqn_network.py       # DQN architecture
-│   │   │   ├── train_3exits_obstacles.py
-│   │   │   ├── train_4exits.py
-│   │   │   └── test.py
 │   │   └── guided_agents/           # Guided agents (realistic)
 │   │       ├── __init__.py
 │   │       └── environment.py
 │   └── utils/                        # Utilities
 │       ├── __init__.py
 │       └── visualization.py
-├── model/                            # Saved models
-│   ├── smart_agents_3exits_obstacles/
-│   └── smart_agents_4exits/
+├── config/                           # Configuration files
+│   ├── simulation_config.json
+│   ├── single_exit.json
+│   ├── with_obstacles.json
+│   └── large_scale.json
+├── model/                            # Saved models (for future guide agents)
 ├── output/                           # Training output
-├── Test/                             # Test output
+│   └── guided/                      # Guided simulation outputs
+├── archive/                          # Deprecated code (smart agents)
+├── run_guided_visualize.py          # Guided simulation visualizer
 ├── README.md                         # This file
 ├── pyproject.toml
-├── requirements.txt
 └── LICENSE
 ```
 
-### Smart Agents vs Guided Agents
+### Agent Types
 
-#### Smart Agents (聪明智能体)
-**Assumptions:**
-- Every person knows the nearest exit location
-- Each person makes optimal individual decisions
-- All agents act independently
-- Suitable for theoretical analysis and benchmarking
-
-**Files:**
-- `evacuation_rl/agents/smart_agents/train_3exits_obstacles.py`
-- `evacuation_rl/agents/smart_agents/train_4exits.py`
-- `evacuation_rl/agents/smart_agents/test.py`
-
-#### Guided Agents (引导智能体) - NEW
+#### Evacuee Agents with Limited Visibility
 **More Realistic Assumptions:**
 - **Limited Exit Visibility**: Agents only see exits when within detection distance
 - **Crowd-Following Behavior**: Agents follow nearby crowds when exits not visible
@@ -192,9 +177,32 @@ Emergency-evacuation-Deep-reinforcement-learning/
 - 🔜 RL-based guide agent training (in progress)
 
 **Files:**
-- `evacuation_rl/agents/guided_agents/environment.py`
+- `evacuation_rl/agents/guided_agents/environment.py` - Main environment implementation
 - `run_guided_visualize.py` - Visualization tool for guided simulation
 - Training scripts (in development)
+
+#### Guide Agents
+**Purpose:**
+- Direct evacuees toward optimal exits
+- Help prevent congestion and improve evacuation efficiency
+- Can be stationary or mobile
+
+**Current Status:**
+- ✅ Framework implemented
+- ✅ Stationary guides working
+- ✅ Mobile guide structure in place
+- 🔜 RL-based training (planned)
+
+**Files:**
+- Integrated in `evacuation_rl/agents/guided_agents/environment.py`
+
+---
+
+### Archived Code
+
+The previous **Smart Agents** implementation (which assumed all agents know all exits) has been moved to the [`archive/`](archive/) folder. It represented a different research direction (vector field approach) and is preserved for historical reference only.
+
+See [`archive/README.md`](archive/README.md) for details.
 
 ---
 
@@ -250,336 +258,170 @@ The code automatically detects and uses GPU if available.
 
 ## Quick Start
 
-### 1. Train a Model
+### 1. Run Guided Evacuation Simulation
 
-Train smart agents for 4-exit scenario:
+Run the guided agent simulation with visualization:
 ```bash
-python -m evacuation_rl.agents.smart_agents.train_4exits
+uv run python run_guided_visualize.py
 ```
 
-Train smart agents for 3-exit + obstacles scenario:
+Or using standard Python:
 ```bash
-python -m evacuation_rl.agents.smart_agents.train_3exits_obstacles
+python run_guided_visualize.py
 ```
 
-**Training Parameters:**
-- Training episodes: 10,000
-- Max steps per episode: 10,000
-- Learning rate: 0.0001
-- Discount factor (gamma): 0.999
-- Memory capacity: 1,000
-- Batch size: 50
+**Features:**
+- Distance-based exit visibility
+- Crowd-following behavior
+- Wall and obstacle detection
+- Trajectory visualization
+- Statistical output
 
-### 2. Test the Model
+**Outputs:**
+- `output/guided/guided_trajectory.png` - Trajectory plot
+- `output/guided/guided_animation.gif` - Animation (if enabled)
+- Console statistics
 
-After training, test and visualize:
+### 2. Configure Simulation
+
+Edit configuration files in the `config/` folder:
 ```bash
-python -m evacuation_rl.agents.smart_agents.test
+config/simulation_config.json     # Main configuration
+config/single_exit.json          # Single exit scenario
+config/with_obstacles.json       # With obstacles
+config/large_scale.json          # Large-scale simulation
 ```
 
-**Training Progress Display:**
-```
-Episode: 1234, Loss: 0.001234, Steps: 156, Epsilon: 0.1234
-```
+### 3. Train Guide Agents (Coming Soon)
 
-- **Episode**: Current training episode
-- **Loss**: Current training loss
-- **Steps**: Steps taken in this episode
-- **Epsilon**: Current exploration rate
+Guide agent training using RL will be implemented in future updates.
 
-### 3. View Available Commands
+### 4. View Available Commands
 
 ```bash
-python -m evacuation_rl help
+python -m evacuation_rl --help
 ```
+
+> **Note:** For archived smart agents code (theoretical baseline), see [`archive/`](archive/) folder.
 
 ---
 
-## Examples
+## Quick Examples
 
-### Example 1: Setting up an Evacuation Environment
+### Running Guided Evacuation Simulation
+
+```bash
+# Run guided evacuation with visualization
+uv run python run_guided_visualize.py
+```
+
+This will:
+- Create a guided evacuation simulation
+- Apply distance-based exit visibility
+- Enable crowd-following behavior
+- Generate trajectory plots and statistics
+- Save outputs to `output/guided/`
+
+### Basic Environment Setup
 
 ```python
 import numpy as np
-from evacuation_rl.environments.cellspace import Cell_Space, Exit, delta_t
-
-# Configure exits (in normalized coordinates [0, 1])
-Exit.clear()
-Exit.append(np.array([0.5, 1.0, 0.5]))  # Top exit
-Exit.append(np.array([0.5, 0.0, 0.5]))  # Bottom exit
-Exit.append(np.array([0.0, 0.5, 0.5]))  # Left exit
-Exit.append(np.array([1.0, 0.5, 0.5]))  # Right exit
-
-# Create environment
-env = Cell_Space(0, 10, 0, 10, 0, 2, rcut=1.5, dt=delta_t, Number=10)
-print(f"Created environment with {env.Number} agents")
-
-# Reset and get initial state
-state = env.reset()
-print(f"Initial state of agent 0: {state}")
-```
-
-### Example 2: Loading a Trained Model
-
-```python
-import torch
-from evacuation_rl.agents.smart_agents.dqn_network import DQN
-
-# Set device
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
-
-# Create model
-model = DQN(state_size=4, action_size=8, hidden_size=64)
-model.to(device)
-model.eval()
-
-# Load checkpoint
-checkpoint_path = './model/smart_agents_4exits/checkpoint.pth'
-checkpoint = torch.load(checkpoint_path, map_location=device)
-model.load_state_dict(checkpoint['main_qn_state_dict'])
-print(f"Loaded model from episode {checkpoint['episode']}")
-```
-
-### Example 3: Testing Agent Action Selection
-
-```python
-import numpy as np
-import torch
-from evacuation_rl.agents.smart_agents.dqn_network import DQN
-
-model, device = # ... (load model as above)
-
-# Create a test state
-test_state = np.array([5.0, 5.0, 0.1, 0.1])  # [x, y, vx, vy]
-
-# Normalize (assuming environment range 0-10)
-normalized_state = test_state.copy()
-normalized_state[:2] = (normalized_state[:2] - 5.0) / 5.0 - 0.5
-
-# Get action from model
-with torch.no_grad():
-    state_tensor = torch.FloatTensor(normalized_state).unsqueeze(0).to(device)
-    q_values = model(state_tensor).cpu().numpy()[0]
-
-action = np.argmax(q_values)
-
-action_names = ['Up', 'Up-Left', 'Left', 'Down-Left', 
-                'Down', 'Down-Right', 'Right', 'Up-Right']
-
-print(f"Q-values: {q_values}")
-print(f"Selected action: {action} ({action_names[action]})")
-```
-
-### Example 4: Exit Visibility System
-
-```python
-from evacuation_rl.environments.cellspace import Cell_Space, Exit
-
-# Configure exits
-Exit.append([0.2, 0.5, 0.5])  # Left exit
-Exit.append([0.8, 0.5, 0.5])  # Right exit
-
-# Initialize environment
-env = Cell_Space(xmin=0., xmax=1., ymin=0., ymax=1., zmin=0., zmax=1., 
-                 rcut=0.1, dt=0.01, Number=50)
-
-# Configure visibility system
-env.visibility_alpha = 0.5  # Sensitivity to congestion
-
-# Update visibility (automatically called each step)
-env.update_visibility_system()
-
-# Get visibility for a particle
-sample_particle = env.Cells[0].Particles[0]
-visibility = env.get_exit_visibility_for_particle(sample_particle, exit_id=0)
-print(f"Exit 0 visibility: {visibility:.3f}")
-```
-
-### Example 5: Guided Agents Framework
-
-```python
 from evacuation_rl.agents.guided_agents.environment import GuidedCellSpace
+import json
 
-print("Guided agents framework features:")
-print("  - Only agents near exits know the optimal way out")
-print("  - Other agents follow crowd behavior")
-print("  - Agents move with crowd when velocity threshold is met")
-print("  - Guide agents help direct evacuation")
+# Load configuration
+with open("config/simulation_config.json", 'r') as f:
+    config = json.load(f)
+
+# Create guided environment
+env = GuidedCellSpace(
+    config=config,
+    num_agents=50,
+    exit_visibility_distance=3.0  # Agents can see exits within 3 units
+)
+
+# Run simulation
+for step in range(1000):
+    done = env.step_guided()
+    if done:
+        print(f"All evacuated in {step} steps!")
+        break
+```
+
+### Configuration Files
+
+Edit `config/simulation_config.json` to customize:
+
+```json
+{
+  "exits": [[0.5, 1.0, 0.5], [0.5, 0.0, 0.5]],
+  "obstacles": [...],
+  "exit_visibility_distance": 3.0,
+  "crowd_following_threshold": 0.5,
+  "num_guide_agents": 2
+}
 ```
 
 ---
 
-## Visualization Tools
+## Visualization
 
-This project includes several visualization tools for analyzing evacuation simulations.
+### Guided Evacuation Visualization
 
-### Tool 1: Quick Visualization (Auto-play Animation)
-
-Quickly preview evacuation animation with automatic playback:
-
-```bash
-python quick_visualize.py
-```
-
-**Features:**
-- Auto-play animation with customizable frame rate
-- Statistical display (remaining agents, evacuated count, rate)
-- Color-coded elements: exits (green stars), obstacles (red squares), agents (blue dots)
-- Sampling control for large datasets
-
-**Customization:**
-```python
-from quick_visualize import create_quick_animation
-
-# Create animation with custom parameters
-anim = create_quick_animation(
-    case_dir='./Test/case_0',  # Data directory
-    step=5,                     # Sample every 5 steps
-    max_frames=500              # Limit to 500 frames
-)
-```
-
-### Tool 2: Full Visualization Tool
-
-More detailed visualization with frame-by-frame control:
-
-```bash
-python visualize_evacuation.py
-```
-
-**Features:**
-- Manual frame navigation
-- Single frame visualization
-- Detailed statistics display
-- Customizable appearance
-
-**Usage:**
-```python
-from visualize_evacuation import create_animation, visualize_single_frame
-
-# Create animation
-anim = create_animation(case_dir='./Test/case_0', max_frames=1000, step=1)
-
-# Or view a single frame
-visualize_single_frame(case_dir='./Test/case_0', step_num=100)
-```
-
-### Tool 3: Guided Agent Visualization
-
-Visualize guided evacuation with trajectory plotting:
+The main visualization tool for guided evacuation:
 
 ```bash
 python run_guided_visualize.py
 ```
 
 **Features:**
-- Trajectory plotting for all agents
-- Animated GIF generation
-- Evacuation status tracking (evacuating vs evacuated)
-- Statistical logging
+- Real-time evacuation simulation
+- Distance-based exit visibility
+- Crowd-following behavior visualization
+- Wall and obstacle detection
+- Guide agent tracking
+- Trajectory plotting
 
 **Outputs:**
 - `output/guided/guided_trajectory.png` - Overall trajectory plot
-- `output/guided/guided_animation.gif` - Animated evacuation process
+- `output/guided/guided_animation.gif` - Animated process (optional)
+- Console statistics and progress
 
 ---
 
-## Exit Visibility System
+## Key Concepts
 
-The Exit Visibility System is a key feature that dynamically adjusts exit visibility based on path congestion.
+### Distance-Based Exit Visibility
 
-### Core Concept
-
-**When many people are on a path to an exit, that exit becomes less "visible" (harder to assume it's a good choice). When few people are on a path, the exit is more visible (easier to recognize as a good choice).**
-
-### Visibility Calculation
-
-For each cell in the grid, the system calculates the visibility of each exit using:
-
-```
-visibility = 1.0 / (1.0 + alpha * particle_count)
-```
-
-Where:
-- `visibility`: ranges from 0 to 1
-  - 1.0 = fully visible (no people on path)
-  - 0.0 = not visible (infinite people or unreachable)
-- `alpha`: sensitivity parameter (default = 0.5)
-- `particle_count`: total number of particles on the shortest path to the exit
-
-### Key Methods
-
-#### `update_visibility_system()`
-**Called automatically at each simulation step**
-
-Updates visibility metrics for all cells based on current particle positions.
+Agents can only "see" exits when within a certain distance:
 
 ```python
-env.update_visibility_system()
+if distance_to_exit < exit_visibility_distance:
+    # Agent knows about this exit
+    move_towards_exit()
+else:
+    # Agent follows crowd behavior
+    follow_nearby_agents()
 ```
 
-#### `get_exit_visibility_for_particle(particle, exit_id=None)`
-**Get the visibility of an exit from a particle's perspective**
+This is more realistic than assuming all agents know all exit locations.
 
-Returns visibility value (0-1) for a specific exit or the nearest exit.
+### Crowd-Following Behavior
+
+When exits are not visible, agents follow nearby crowds:
 
 ```python
-# Get visibility for nearest exit
-nearest_exit_visibility = env.get_exit_visibility_for_particle(particle)
-
-# Get visibility for specific exit
-exit_visibility = env.get_exit_visibility_for_particle(particle, exit_id=0)
+if avg_neighbor_velocity > crowd_threshold:
+    # Join the crowd movement
+    velocity = match_crowd_velocity(neighbors)
 ```
 
-#### `bfs_path_to_exit(from_cell_id, exit_id)`
-**Find shortest path from a cell to an exit**
+### Guide Agents
 
-Returns list of cell IDs forming the path.
-
-```python
-path = env.bfs_path_to_exit(cell_id=5, exit_id=0)
-```
-
-#### `calculate_path_visibility(path, exit_id)`
-**Calculate visibility for a specific path**
-
-Returns tuple (particle_count, visibility).
-
-```python
-particle_count, visibility = env.calculate_path_visibility(path, exit_id=0)
-```
-
-### Cell Attributes
-
-Each cell maintains visibility information:
-
-```python
-cell = env.Cells[cell_id]
-
-# Get visibility to exit 0
-visibility = cell.exit_visibility[0]  # 0.0 to 1.0
-
-# Get particle count on path to exit 0
-count = cell.particle_count_to_exit[0]
-
-# Get the path (list of cell IDs)
-path = cell.path_to_exit[0]
-```
-
-### Configuration Parameters
-
-```python
-# Sensitivity to congestion (higher = more sensitive)
-env.visibility_alpha = 0.5
-
-# Maximum distance to calculate visibility for
-env.max_visibility_distance = 10
-```
-
-### Example Usage
-
-See the complete example in the [Examples](#example-4-exit-visibility-system) section above.
+Guide agents (stationary or mobile) help direct evacuees:
+- Positioned strategically near exits or in corridors  
+- Influence evacuee movement decisions
+- Future: Will be trained using RL to optimize positioning
 
 ---
 
@@ -604,41 +446,9 @@ In `evacuation_rl/environments/cellspace.py`:
 | `visibility_alpha` | float | 0.5 | Visibility sensitivity to congestion |
 | `max_visibility_distance` | float | 10 | Max distance for visibility calculation |
 
-### Training Parameters
+### Environment Parameters
 
-In training scripts (e.g., `evacuation_rl/agents/smart_agents/train_4exits.py`):
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `train_episodes` | int | 10000 | Max number of episodes |
-| `max_steps` | int | 10000 | Max steps per episode |
-| `batch_size` | int | 50 | Training batch size |
-| `gamma` | float | 0.999 | Discount factor |
-| `memory_size` | int | 1000 | Experience replay buffer size |
-| `explore_start` | float | 1.0 | Initial exploration rate |
-| `explore_stop` | float | 0.1 | Minimum exploration rate |
-| `decay_rate` | float | 0.0001 | Exploration decay rate |
-| `learning_rate` | float | 1e-4 | Adam optimizer learning rate |
-| `update_target_every` | int | 1 | Target network update frequency |
-| `tau` | float | 0.1 | Soft update factor |
-| `save_step` | int | 1000 | Model checkpoint save frequency |
-| `train_step` | int | 1 | Training frequency per step |
-| `Cfg_save_freq` | int | 100 | Config save frequency |
-
-### Testing Parameters
-
-In testing script (`evacuation_rl/agents/smart_agents/test.py`):
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `test_episodes` | int | 10 | Number of episodes to test |
-| `Number_Agent` | int | 80 | Number of agents to evacuate |
-| `max_steps` | int | 10000 | Max steps in an episode |
-| `Cfg_save_freq` | int | 1 | Config save frequency |
-
----
-
-## Future Work
+In `evacuation_rl/environments/cellspace.py`:
 
 ### 🎯 Planned Enhancements
 
