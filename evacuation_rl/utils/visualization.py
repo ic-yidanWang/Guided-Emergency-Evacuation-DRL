@@ -5,6 +5,183 @@ Visualization utilities for evacuation simulation
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+from matplotlib.patches import Rectangle, Circle
+
+
+def draw_exits(ax, exits, domain, label='Exits', zorder=5):
+    """
+    Draw exit points on the axes
+    
+    Args:
+        ax: Matplotlib axes object
+        exits: List of exit positions (normalized [0,1] or absolute coordinates)
+        domain: Domain boundaries dict with 'x', 'y', 'z' keys
+        label: Label for legend
+        zorder: Z-order for rendering (higher values appear on top)
+    """
+    if exits:
+        exits = np.array(exits)
+        # Check if exits are normalized (all values <= 1) or absolute
+        if exits.size > 0 and np.all(exits[:, :2] <= 1.0):
+            # Normalized coordinates, convert to absolute
+            ax.scatter(exits[:, 0] * domain['x'], exits[:, 1] * domain['y'], 
+                      c='yellow', marker='*', s=500, edgecolors='black', 
+                      linewidths=2, label=label, zorder=zorder)
+        else:
+            # Already absolute coordinates
+            ax.scatter(exits[:, 0], exits[:, 1], 
+                      c='yellow', marker='*', s=500, edgecolors='black', 
+                      linewidths=2, label=label, zorder=zorder)
+
+
+def draw_guides(ax, guides, domain, label='Guides', zorder=4):
+    """
+    Draw guide points (static red circles) on the axes
+    
+    Args:
+        ax: Matplotlib axes object
+        guides: List of guide positions (normalized [0,1] or absolute coordinates)
+        domain: Domain boundaries dict with 'x', 'y', 'z' keys
+        label: Label for legend
+        zorder: Z-order for rendering
+    """
+    if guides:
+        guides = np.array(guides)
+        # Check if guides are normalized (all values <= 1) or absolute
+        if guides.size > 0 and np.all(guides[:, :2] <= 1.0):
+            # Normalized coordinates, convert to absolute
+            ax.scatter(guides[:, 0] * domain['x'], guides[:, 1] * domain['y'], 
+                      c='red', marker='o', s=300, edgecolors='darkred', 
+                      linewidths=2, label=label, zorder=zorder)
+        else:
+            # Already absolute coordinates
+            ax.scatter(guides[:, 0], guides[:, 1], 
+                      c='red', marker='o', s=300, edgecolors='darkred', 
+                      linewidths=2, label=label, zorder=zorder)
+
+
+def draw_obstacles(ax, obstacle_configs=None, obstacles=None, domain=None, label='Obstacles', zorder=3):
+    """
+    Draw obstacles on the axes
+    
+    Args:
+        ax: Matplotlib axes object
+        obstacle_configs: List of obstacle configs with type info (circle/rectangle) in absolute coordinates
+        obstacles: Optional list of raw obstacle positions (fallback, normalized [0,1])
+        domain: Domain boundaries dict with 'x', 'y', 'z' keys (required if obstacles provided)
+        label: Label for legend
+        zorder: Z-order for rendering
+    """
+    if obstacle_configs:
+        # Use original obstacle configs to draw rectangles/circles
+        # Note: obstacle_configs are in ABSOLUTE coordinates from config file
+        for obs in obstacle_configs:
+            obs_type = obs.get('type', 'circle')
+            
+            if obs_type == 'circle':
+                # Draw circle obstacle with proper radius
+                # Coordinates are already absolute, no scaling needed
+                center_x = obs['x']
+                center_y = obs['y']
+                radius = obs.get('size', 0.5)  # Size is in absolute units
+                
+                circle = Circle((center_x, center_y), radius, 
+                               linewidth=2, edgecolor='black', 
+                               facecolor='gray', alpha=0.4, zorder=zorder)
+                ax.add_patch(circle)
+            
+            elif obs_type == 'rectangle':
+                center_x = obs['x']
+                center_y = obs['y']
+                width = obs.get('width', 0.4)
+                height = obs.get('height', 0.3)
+                
+                rect_x = center_x - width / 2
+                rect_y = center_y - height / 2
+                
+                rect = Rectangle((rect_x, rect_y), width, height, 
+                                linewidth=2, edgecolor='black', 
+                                facecolor='gray', alpha=0.4, zorder=zorder)
+                ax.add_patch(rect)
+    
+    elif obstacles and domain:
+        # Fallback to plotting raw obstacle points if no configs provided
+        obstacles_arr = np.array(obstacles)
+        # Check if obstacles are normalized (all values <= 1) or absolute
+        if obstacles_arr.size > 0 and np.all(obstacles_arr[:, :2] <= 1.0):
+            # Normalized coordinates, convert to absolute
+            ax.scatter(obstacles_arr[:, 0] * domain['x'], obstacles_arr[:, 1] * domain['y'], 
+                      c='black', marker='s', s=200, label=label, zorder=zorder)
+        else:
+            # Already absolute coordinates
+            ax.scatter(obstacles_arr[:, 0], obstacles_arr[:, 1], 
+                      c='black', marker='s', s=200, label=label, zorder=zorder)
+
+
+# Scale factor for drawing particle radii (smaller = less overlap, still proportional to config size)
+VIS_RADIUS_SCALE = 0.5
+
+
+def draw_agents(ax, agents, domain, label='Agents', zorder=2, alpha=0.6, agent_size=0.18):
+    """
+    Draw regular agents (blue circles). Radius = agent_size * VIS_RADIUS_SCALE to avoid overlap.
+    
+    Args:
+        ax: Matplotlib axes object
+        agents: List of agent positions (normalized [0,1] or absolute coordinates)
+        domain: Domain boundaries dict with 'x', 'y', 'z' keys
+        label: Label for legend
+        zorder: Z-order for rendering
+        alpha: Transparency level (0-1)
+        agent_size: Radius of agent circles in world units (default 0.18); scales with config.
+    """
+    if agents:
+        agents = np.array(agents)
+        if agents.size > 0 and np.all(agents[:, :2] <= 1.0):
+            xy = agents[:, :2] * np.array([domain['x'], domain['y']])
+        else:
+            xy = agents[:, :2]
+        r = agent_size * VIS_RADIUS_SCALE
+        for i in range(len(xy)):
+            circle = Circle((xy[i, 0], xy[i, 1]), r,
+                            facecolor='blue', edgecolor='darkblue', alpha=alpha,
+                            linewidth=1, zorder=zorder, label=label if i == 0 else '')
+            ax.add_patch(circle)
+
+
+def draw_guide_agents(ax, guide_agents, domain, label='Guide Agents', zorder=4, guide_size=0.25, guide_radius=None):
+    """
+    Draw guide agents (yellow/gold circles) and optional dashed influence circle.
+    
+    Args:
+        ax: Matplotlib axes object
+        guide_agents: List of guide agent positions (normalized [0,1] or absolute coordinates)
+        domain: Domain boundaries dict with 'x', 'y', 'z' keys
+        label: Label for legend
+        zorder: Z-order for rendering
+        guide_size: Radius of guide circles in world units (default 0.25); typically larger than agents.
+        guide_radius: If set, draw a dashed circle around each guide with this radius (influence zone).
+    """
+    if guide_agents:
+        guide_agents = np.array(guide_agents)
+        if guide_agents.size > 0 and np.all(guide_agents[:, :2] <= 1.0):
+            xy = guide_agents[:, :2] * np.array([domain['x'], domain['y']])
+        else:
+            xy = guide_agents[:, :2]
+        # Draw influence circle (dashed) behind the guide dot
+        if guide_radius is not None and guide_radius > 0:
+            for i in range(len(xy)):
+                ring = Circle((xy[i, 0], xy[i, 1]), guide_radius,
+                              facecolor='none', edgecolor='orange', linestyle='--',
+                              linewidth=1.2, alpha=0.8, zorder=zorder - 1)
+                ax.add_patch(ring)
+        # Draw guide dot
+        r = guide_size * VIS_RADIUS_SCALE
+        for i in range(len(xy)):
+            circle = Circle((xy[i, 0], xy[i, 1]), r,
+                            facecolor='gold', edgecolor='orange', linewidth=2,
+                            zorder=zorder, label=label if i == 0 else '')
+            ax.add_patch(circle)
 
 
 def visualize_policy(model, device, offset=np.array([0.5, 0.5])):
@@ -116,20 +293,28 @@ def plot_training_stats(episodes, losses, steps, save_path=None):
     return fig, (ax1, ax2)
 
 
-def create_animation_from_configs(config_dir, output_file='evacuation.gif', fps=10, domain=None, obstacle_configs=None):
+def create_animation_from_configs(config_dir, output_file='evacuation.gif', fps=10, domain=None, obstacle_configs=None, agent_size=None, guide_size=None, guide_radius=None):
     """
-    Create animation from saved configuration files
-    
+    Create animation from saved configuration files.
+    Circle sizes should be passed from config (real simulation values), not hardcoded.
+
     Args:
         config_dir: Directory containing configuration files
         output_file: Output animation file path
         fps: Frames per second
         domain: Optional domain dict with 'x', 'y', 'z' dimensions
         obstacle_configs: List of obstacle configs with type info (for proper visualization)
+        agent_size: Radius of agent circles in world units (from config exit_parameters.agent_size).
+        guide_size: Radius of guide agent circles in world units (from config guide_parameters.guide_size).
+        guide_radius: Radius of dashed influence circle around each guide (from config guide_parameters.guide_radius).
     """
+    # Use passed config values; fallback only when caller does not pass (e.g. legacy call)
+    if agent_size is None:
+        agent_size = 0.18
+    if guide_size is None:
+        guide_size = 0.25
     import glob
     from matplotlib.animation import FuncAnimation, PillowWriter
-    from matplotlib.patches import Rectangle, Circle
     
     # Find all config files
     config_files = sorted(glob.glob(os.path.join(config_dir, 's.*')), 
@@ -164,70 +349,12 @@ def create_animation_from_configs(config_dir, output_file='evacuation.gif', fps=
         ax.set_ylim(0, domain['y'])
         ax.set_aspect('equal')
         
-        # Plot exits (yellow stars)
-        if exits:
-            exits_arr = np.array(exits)
-            ax.scatter(exits_arr[:, 0] * domain['x'], exits_arr[:, 1] * domain['y'], 
-                      c='yellow', marker='*', s=500, edgecolors='black', 
-                      linewidths=2, label='Exits', zorder=5)
-        
-        # Plot guides (red circles)
-        if guides:
-            guides_arr = np.array(guides)
-            ax.scatter(guides_arr[:, 0] * domain['x'], guides_arr[:, 1] * domain['y'], 
-                      c='red', marker='o', s=300, edgecolors='darkred', 
-                      linewidths=2, label='Guides', zorder=4)
-        
-        # Plot obstacles with proper type support
-        if obstacle_configs:
-            # Use original obstacle configs to draw rectangles/circles
-            # Note: obstacle_configs are in ABSOLUTE coordinates from config file
-            for obs in obstacle_configs:
-                obs_type = obs.get('type', 'circle')
-                
-                if obs_type == 'circle':
-                    # Draw circle obstacle with proper radius
-                    # Coordinates are already absolute, no scaling needed
-                    center_x = obs['x']
-                    center_y = obs['y']
-                    radius = obs.get('size', 0.5)  # Size is in absolute units
-                    
-                    circle = Circle((center_x, center_y), radius, 
-                                   linewidth=2, edgecolor='black', 
-                                   facecolor='gray', alpha=0.4, zorder=3)
-                    ax.add_patch(circle)
-                
-                elif obs_type == 'rectangle':
-                    center_x = obs['x']
-                    center_y = obs['y']
-                    width = obs.get('width', 0.4)
-                    height = obs.get('height', 0.3)
-                    
-                    rect_x = center_x - width / 2
-                    rect_y = center_y - height / 2
-                    
-                    rect = Rectangle((rect_x, rect_y), width, height, 
-                                    linewidth=2, edgecolor='black', 
-                                    facecolor='gray', alpha=0.4, zorder=3)
-                    ax.add_patch(rect)
-        elif obstacles:
-            # Fallback to plotting raw obstacle points if no configs provided
-            obstacles_arr = np.array(obstacles)
-            ax.scatter(obstacles_arr[:, 0] * domain['x'], obstacles_arr[:, 1] * domain['y'], 
-                      c='black', marker='s', s=200, label='Obstacles', zorder=3)
-        
-        # Plot guide agents (yellow circles - moving guides)
-        if guide_agents:
-            guide_agents_arr = np.array(guide_agents)
-            ax.scatter(guide_agents_arr[:, 0] * domain['x'], guide_agents_arr[:, 1] * domain['y'], 
-                      c='gold', marker='o', s=100, edgecolors='orange', 
-                      linewidths=2, label='Guide Agents', zorder=4)
-        
-        # Plot agents (blue circles)
-        if agents:
-            agents_arr = np.array(agents)
-            ax.scatter(agents_arr[:, 0] * domain['x'], agents_arr[:, 1] * domain['y'], 
-                      c='blue', marker='o', s=50, alpha=0.6, label='Agents', zorder=2)
+        # Draw all elements using dedicated functions
+        draw_exits(ax, exits, domain)
+        draw_guides(ax, guides, domain)
+        draw_obstacles(ax, obstacle_configs=obstacle_configs, obstacles=obstacles, domain=domain)
+        draw_guide_agents(ax, guide_agents, domain, guide_size=guide_size, guide_radius=guide_radius)
+        draw_agents(ax, agents, domain, agent_size=agent_size)
         
         # Add grid
         ax.grid(True, alpha=0.3)
@@ -337,6 +464,144 @@ def parse_config_file(filepath):
     return exits, guides, obstacles, agents, guide_agents, domain
 
 
+def draw_training_frame(ax, env, domain, obstacle_configs, agent_size=0.18, guide_size=0.25, guide_radius=None,
+                       episode=None, total_episodes=None, step=None, ep_reward=0.0, fig=None):
+    """
+    Draw a single frame for real-time training visualization from env state.
+    env must have get_all_positions_for_vis(), Exit, L.
+    Optionally show episode, step, remaining agents/guides, and episode reward in a text box.
+    If fig is provided, use fig.canvas to refresh without raising the window (avoids steal-focus).
+    """
+    agents_xy, guide_agents_xy = env.get_all_positions_for_vis()
+    n_agents = len(agents_xy)
+    n_guides = len(guide_agents_xy)
+    exits = [e.tolist() if hasattr(e, 'tolist') else list(e) for e in env.Exit]
+    ax.clear()
+    ax.set_xlim(0, domain['x'])
+    ax.set_ylim(0, domain['y'])
+    ax.set_aspect('equal')
+    draw_exits(ax, exits, domain)
+    draw_obstacles(ax, obstacle_configs=obstacle_configs, domain=domain)
+    draw_guide_agents(ax, guide_agents_xy, domain, guide_size=guide_size, guide_radius=guide_radius)
+    draw_agents(ax, agents_xy, domain, agent_size=agent_size)
+    ax.grid(True, alpha=0.3)
+    ax.set_xlabel('X Position', fontsize=12)
+    ax.set_ylabel('Y Position', fontsize=12)
+    # Info box: episode, step, remaining agents/guides, episode reward
+    info_lines = []
+    if episode is not None and total_episodes is not None:
+        info_lines.append(f"Episode: {episode}/{total_episodes}")
+    if step is not None:
+        info_lines.append(f"Step: {step}")
+    info_lines.append(f"Agents (remaining): {n_agents}")
+    info_lines.append(f"Guides: {n_guides}")
+    info_lines.append(f"Episode reward: {ep_reward:.2f}")
+    info_text = "\n".join(info_lines)
+    ax.text(0.02, 0.98, info_text, transform=ax.transAxes, fontsize=10,
+            verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    ax.legend(loc='upper right', fontsize=8)
+    if fig is not None:
+        fig.canvas.draw_idle()
+        fig.canvas.flush_events()
+    else:
+        plt.draw()
+        plt.pause(0.001)
+
+
+def draw_reward_curve(ax, total_reward_per_episode, max_episodes=None, fig=None):
+    """Update the reward curve axes with episode rewards (real-time). Initializes title/labels/axis range from the start.
+    If fig is provided, use fig.canvas to refresh without raising the window (avoids steal-focus)."""
+    ax.clear()
+    if max_episodes is None and total_reward_per_episode:
+        max_episodes = len(total_reward_per_episode)
+    if max_episodes is None:
+        max_episodes = 50
+    ax.set_xlim(0, max(1, max_episodes))
+    ax.set_xlabel('Episode', fontsize=10)
+    ax.set_ylabel('Total reward', fontsize=10)
+    ax.set_title('Episode reward', fontsize=12)
+    ax.grid(True, alpha=0.3)
+    if not total_reward_per_episode:
+        ax.set_ylim(-50, 0)  # typical reward scale
+        if fig is not None:
+            fig.canvas.draw_idle()
+            fig.canvas.flush_events()
+        else:
+            plt.draw()
+            plt.pause(0.001)
+        return
+    episodes = list(range(1, len(total_reward_per_episode) + 1))
+    ax.plot(episodes, total_reward_per_episode, 'b-', linewidth=1.5, label='Reward')
+    if total_reward_per_episode:
+        lo, hi = min(total_reward_per_episode), max(total_reward_per_episode)
+        margin = max(1, (hi - lo) * 0.1) if hi > lo else 1
+        ax.set_ylim(lo - margin, hi + margin)
+    ax.legend(loc='upper right', fontsize=8)
+    if fig is not None:
+        fig.canvas.draw_idle()
+        fig.canvas.flush_events()
+    else:
+        plt.draw()
+        plt.pause(0.001)
+
+
+def visualize_evacuation(exits, guides, obstacle_configs, agents, domain, save_path=None, agent_size=0.18):
+    """
+    Visualize the evacuation scenario
+    
+    Args:
+        exits: List of exit positions (normalized [0,1])
+        guides: List of guide positions (normalized [0,1])
+        obstacle_configs: List of ORIGINAL obstacle configs (absolute coordinates)
+        agents: List of agent positions (normalized [0,1])
+        domain: Domain boundaries
+        save_path: Optional path to save the figure
+        agent_size: Radius of agent circles in world units (default 0.18).
+    
+    Returns:
+        fig, ax: Matplotlib figure and axes objects
+    """
+    fig, ax = plt.subplots(figsize=(10, 10))
+    
+    # Set domain limits
+    ax.set_xlim(0, domain['x'])
+    ax.set_ylim(0, domain['y'])
+    ax.set_aspect('equal')
+    
+    # Draw all elements using dedicated functions
+    draw_exits(ax, exits, domain)
+    draw_guides(ax, guides, domain)
+    draw_obstacles(ax, obstacle_configs=obstacle_configs, domain=domain)
+    draw_agents(ax, agents, domain, agent_size=agent_size)
+    
+    # Add grid
+    ax.grid(True, alpha=0.3)
+    
+    # Labels and title
+    ax.set_xlabel('X Position', fontsize=14)
+    ax.set_ylabel('Y Position', fontsize=14)
+    ax.set_title('Guided Evacuation Scenario\nRed points are guide locations', fontsize=16, fontweight='bold')
+    
+    # Legend
+    ax.legend(loc='upper right', fontsize=12)
+    
+    # Add info text
+    info_text = f"Exits: {len(exits)}\nGuides: {len(guides)}\nAgents: {len(agents)}"
+    ax.text(0.02, 0.98, info_text, transform=ax.transAxes, 
+            verticalalignment='top', fontsize=11,
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"Figure saved to: {save_path}")
+    
+    plt.show()
+    
+    return fig, ax
+
+
 def plot_evacuation_trajectory(positions, exits, obstacles=None, obstacle_configs=None, domain=None, save_path=None):
     """
     Plot evacuation trajectories
@@ -349,8 +614,6 @@ def plot_evacuation_trajectory(positions, exits, obstacles=None, obstacle_config
         domain: Optional domain dict with 'x', 'y', 'z' dimensions
         save_path: Optional path to save the plot
     """
-    from matplotlib.patches import Rectangle, Circle
-    
     fig, ax = plt.subplots(figsize=(8, 8))
     
     # Determine domain size
@@ -364,45 +627,14 @@ def plot_evacuation_trajectory(positions, exits, obstacles=None, obstacle_config
         ax.plot(positions[0, i, 0], positions[0, i, 1], 'go', markersize=5, label='Start' if i == 0 else '')
         ax.plot(positions[-1, i, 0], positions[-1, i, 1], 'ro', markersize=5, label='End' if i == 0 else '')
     
-    # Plot exits
-    for e in exits:
-        ax.plot(e[0], e[1], 'y*', markersize=20, markeredgecolor='k', markeredgewidth=1.5)
+    # Draw exits and obstacles using dedicated functions
+    # Note: exits in trajectory plot are already absolute coordinates
+    if exits:
+        exits_list = [[e[0], e[1], e[2]] if len(e) > 2 else [e[0], e[1], 0] for e in exits]
+        draw_exits(ax, exits_list, domain)
     
-    # Plot obstacles with type support
-    if obstacle_configs:
-        for obs in obstacle_configs:
-            obs_type = obs.get('type', 'circle')
-            
-            if obs_type == 'circle':
-                # Draw circle obstacle
-                # Coordinates are already absolute, no scaling needed
-                center_x = obs['x']
-                center_y = obs['y']
-                radius = obs.get('size', 0.5)  # Size is in absolute units
-                
-                circle = Circle((center_x, center_y), radius, 
-                               linewidth=2, edgecolor='black', 
-                               facecolor='gray', alpha=0.5, label='Obstacle' if obs == obstacle_configs[0] else '')
-                ax.add_patch(circle)
-            
-            elif obs_type == 'rectangle':
-                # Draw rectangle obstacle
-                center_x = obs['x']
-                center_y = obs['y']
-                width = obs.get('width', 0.4)
-                height = obs.get('height', 0.3)
-                
-                rect_x = center_x - width / 2
-                rect_y = center_y - height / 2
-                
-                rect = Rectangle((rect_x, rect_y), width, height, 
-                                linewidth=2, edgecolor='black', 
-                                facecolor='gray', alpha=0.5, label='Obstacle' if obs == obstacle_configs[0] else '')
-                ax.add_patch(rect)
-    elif obstacles:
-        # Fallback to plotting raw obstacle points
-        for ob in obstacles:
-            ax.plot(ob[0], ob[1], 'ks', markersize=15)
+    # Draw obstacles using dedicated function
+    draw_obstacles(ax, obstacle_configs=obstacle_configs, obstacles=obstacles, domain=domain)
     
     ax.set_xlabel('X Position')
     ax.set_ylabel('Y Position')

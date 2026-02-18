@@ -326,7 +326,7 @@ This will:
 
 ```python
 import numpy as np
-from evacuation_rl.agents.guided_agents.environment import GuidedCellSpace
+from evacuation_rl.environments import GuidedCellSpace
 import json
 
 # Load configuration

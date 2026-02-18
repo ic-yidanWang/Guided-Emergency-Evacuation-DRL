@@ -176,12 +176,11 @@ def main():
             env.save_output(pathdir + '/s.' + str(t))
         
         while t < max_steps:
-            # Get action from Q-network (ALL Particles)
-            done = env.step_all_pytorch(mainQN_4Exits, device, Normalized=True)
-            # done = env.step_all_pytorch(mainQN_3Exits_Ob, device, Normalized=True)
-            
-            # Alternative: use optimal (nearest exit) policy
-            # done = env.step_optimal() 
+            # step_all_pytorch / step_optimal were removed from Cell_Space.
+            # For multi-agent evacuation use GuidedCellSpace and env.step_guided() (see run_guided_visualize.py).
+            # Here we use single-agent step with random action for compatibility:
+            action = env.choose_random_action()
+            _, _, done = env.step(action) 
             
             step += 1
             t += 1

@@ -40,12 +40,10 @@ uv run .\run_guided_visualize.py --config config/custom_config.json
 ```
 
 ### 3. agents (智能体参数)
-控制智能体数量
+控制粒子数量
 ```json
 "agents": {
-  "number": 80,          // 普通 agent 总数
-  "n_move_guide": 4,     // 移动 guide agent 数量（黄色）
-  "n_static_guide": 4    // 静态 guide 点数量（红色）
+  "n_particle": 80   // 疏散粒子总数
 }
 ```
 
@@ -107,12 +105,11 @@ uv run .\run_guided_visualize.py --config config/custom_config.json
 
 ## 常见修改场景
 
-### 增加智能体数量
-修改 `agents.number`，例如改为 100：
+### 增加粒子数量
+修改 `agents.n_particle`，例如改为 100：
 ```json
 "agents": {
-  "number": 100,
-  ...
+  "n_particle": 100
 }
 ```
 
@@ -178,7 +175,6 @@ uv run .\run_guided_visualize.py --config config/custom_config.json
 
 - `single_exit.json` - 单出口瓶颈场景
   - 60 agents，1 出口
-  - 更多的 guide 来组织流量（`n_move_guide=6`）
   - 较小的 `exit_radius=0.8` 防止门前堆积
 
 - `with_obstacles.json` - 带障碍物场景

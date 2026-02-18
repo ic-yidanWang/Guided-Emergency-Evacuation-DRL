@@ -5,7 +5,7 @@ Comprehensive test comparing the buggy and fixed behavior
 import numpy as np
 import json
 from evacuation_rl.environments import cellspace
-from evacuation_rl.agents.guided_agents.environment import GuidedCellSpace
+from evacuation_rl.environments import GuidedCellSpace
 
 def run_test(use_fix=False, test_name=""):
     """Run a test with or without the fix"""
@@ -45,14 +45,12 @@ def run_test(use_fix=False, test_name=""):
         zmax=config['domain']['zmax'],
         rcut=config['physics']['rcut'],
         dt=config['physics']['dt'],
-        Number=config['agents']['number'],
+        Number=config['agents']['n_particle'],
         door_visible_radius=config['guide_parameters']['door_visible_radius'],
         knn_k=config['guide_parameters']['knn_k'],
-        n_move_guide=config['agents']['n_move_guide'],
         guide_radius=config['guide_parameters']['guide_radius'],
         use_knn=config['guide_parameters']['use_knn'],
         speed_scale=config['physics']['speed_scale'],
-        n_static_guide=config['agents']['n_static_guide'],
         obstacle_configs=config.get('obstacles', []),
         knn_max_distance=config['guide_parameters']['knn_max_distance'],
         knn_filter_obstacles=config['guide_parameters'].get('knn_filter_obstacles', True)

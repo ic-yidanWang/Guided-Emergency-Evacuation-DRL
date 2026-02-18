@@ -7,7 +7,7 @@ Test script to verify KNN filtering logic:
 
 import numpy as np
 import json
-from evacuation_rl.agents.guided_agents.environment import GuidedCellSpace
+from evacuation_rl.environments import GuidedCellSpace
 
 def test_knn_filtering():
     """Test KNN filtering with various configurations"""
@@ -36,11 +36,9 @@ def test_knn_filtering():
         Number=10,  # Small number for testing
         door_visible_radius=config['guide_parameters']['door_visible_radius'],
         knn_k=5,
-        n_move_guide=0,
         guide_radius=config['guide_parameters']['guide_radius'],
         use_knn=True,
         speed_scale=config['physics']['speed_scale'],
-        n_static_guide=0,
         obstacle_configs=config.get('obstacles', []),
         knn_max_distance=3.0,  # Max distance for KNN
         knn_filter_obstacles=True  # Filter by obstacles
@@ -87,11 +85,9 @@ def test_knn_filtering():
         Number=10,
         door_visible_radius=config['guide_parameters']['door_visible_radius'],
         knn_k=5,
-        n_move_guide=0,
         guide_radius=config['guide_parameters']['guide_radius'],
         use_knn=True,
         speed_scale=config['physics']['speed_scale'],
-        n_static_guide=0,
         obstacle_configs=config.get('obstacles', []),
         knn_max_distance=10.0,  # High max distance
         knn_filter_obstacles=False  # No obstacle filtering

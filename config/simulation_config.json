@@ -17,18 +17,23 @@
   },
   
   "agents": {
-    "number": 80,
-    "n_move_guide": 0,
-    "n_static_guide": 0
+    "n_particle": 80,
+    "add_guide_agent": true
   },
   
   "guide_parameters": {
     "guide_radius": 1.5,
-    "door_visible_radius": 1.5,
+    "door_visible_radius": 1.0,
     "use_knn": true,
     "knn_k": 5,
-    "knn_max_distance": 2.0,
-    "knn_filter_obstacles": true
+    "knn_max_distance": 1.0,
+    "knn_filter_obstacles": true,
+    "guide_initial_position_mode": "fixed",
+    "guide_initial_position": [5.0, 5.0, 0.5],
+    "guide_size": 0.25,
+    "guide_influence_gain": 2.0,
+    "guide_influence_decay": 0.5,
+    "follow_guide_distance_threshold": 2.0
   },
   
   "exit_parameters": {
@@ -60,5 +65,27 @@
   "visualization": {
     "fps": 10,
     "gif_filename": "guided_animation.gif"
+  },
+
+  "train": {
+    "visualize": true,
+    "refresh_interval": 5,
+    "max_guide_speed": 2.0,
+    "reward_scale": -0.1,
+    "exit_reward_scale": 2.0,
+    "guide_boundary_margin": 0.8,
+    "guide_boundary_penalty_scale": 0.5,
+    "guide_corner_penalty_scale": 0.3,
+    "n_in_range_threshold": 0.2,
+    "reward_toward_exit_scale": 0.1,
+    "reward_toward_crowd_scale": 0.1,
+    "episodes": 50,
+    "steps_per_episode": 200,
+    "lr_actor": 3e-4,
+    "lr_critic": 1e-3,
+    "gamma": 0.99,
+    "log_std_init": 0.0,
+    "exploration_noise_std": 0.35,
+    "exploration_decay": 0.995
   }
 }

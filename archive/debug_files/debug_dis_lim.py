@@ -1,7 +1,7 @@
 """Debug exit detection in step_guided"""
 import numpy as np
 from evacuation_rl.environments import cellspace
-from evacuation_rl.agents.guided_agents.environment import GuidedCellSpace
+from evacuation_rl.environments import GuidedCellSpace
 import json
 
 # Configure
@@ -42,8 +42,6 @@ for obstacle in config.get('obstacles', []):
         cellspace.Ob_type.append('rectangle')
         cellspace.Ob_params.append({'center': np.array([center_x, center_y, center_z]), 'width': width, 'height': height})
 
-cellspace.Guide = []
-
 # Create environment
 env = GuidedCellSpace(
     xmin=config['domain']['xmin'],
@@ -57,11 +55,9 @@ env = GuidedCellSpace(
     Number=3,
     door_visible_radius=config['guide_parameters']['door_visible_radius'],
     knn_k=config['guide_parameters']['knn_k'],
-    n_move_guide=config['agents']['n_move_guide'],
     guide_radius=config['guide_parameters']['guide_radius'],
     use_knn=config['guide_parameters']['use_knn'],
     speed_scale=config['physics']['speed_scale'],
-    n_static_guide=config['agents']['n_static_guide'],
     obstacle_configs=config.get('obstacles', []),
     knn_max_distance=config['guide_parameters'].get('knn_max_distance', 3.0),
     knn_filter_obstacles=config['guide_parameters'].get('knn_filter_obstacles', True)
