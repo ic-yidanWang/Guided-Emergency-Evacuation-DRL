@@ -1,0 +1,54 @@
+{
+  "description": "Large Scale Evacuation - 200 agents with 6 exits",
+  
+  "domain": {
+    "xmin": 0.0,
+    "xmax": 20.0,
+    "ymin": 0.0,
+    "ymax": 20.0,
+    "zmin": 0.0,
+    "zmax": 2.0
+  },
+  
+  "physics": {
+    "rcut": 0.5,
+    "dt": 0.1,
+    "speed_scale": 1.0
+  },
+  
+  "agents": {
+    "number": 200,
+    "n_move_guide": 8,
+    "n_static_guide": 10
+  },
+  
+  "guide_parameters": {
+    "guide_radius": 1.5,
+    "exit_knowledge_radius": 3.0,
+    "exit_radius": 1.5,
+    "use_knn": true,
+    "knn_k": 5
+  },
+  
+  "exits": [
+    {"x": 0.5, "y": 1.0, "z": 0.5, "description": "Top center"},
+    {"x": 0.5, "y": 0.0, "z": 0.5, "description": "Bottom center"},
+    {"x": 0.0, "y": 0.5, "z": 0.5, "description": "Left center"},
+    {"x": 1.0, "y": 0.5, "z": 0.5, "description": "Right center"},
+    {"x": 0.25, "y": 1.0, "z": 0.5, "description": "Top left"},
+    {"x": 0.75, "y": 1.0, "z": 0.5, "description": "Top right"}
+  ],
+  
+  "obstacles": [],
+  
+  "simulation": {
+    "num_steps": 300,
+    "save_interval": 5,
+    "output_dir": "output/large_scale"
+  },
+  
+  "visualization": {
+    "fps": 10,
+    "gif_filename": "large_scale_animation.gif"
+  }
+}

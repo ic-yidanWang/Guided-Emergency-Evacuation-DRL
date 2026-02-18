@@ -1,0 +1,64 @@
+{
+  "description": "Guided Evacuation Simulation Configuration",
+  
+  "domain": {
+    "xmin": 0.0,
+    "xmax": 10.0,
+    "ymin": 0.0,
+    "ymax": 10.0,
+    "zmin": 0.0,
+    "zmax": 2.0
+  },
+  
+  "physics": {
+    "rcut": 0.5,
+    "dt": 0.1,
+    "speed_scale": 1.0
+  },
+  
+  "agents": {
+    "number": 80,
+    "n_move_guide": 0,
+    "n_static_guide": 0
+  },
+  
+  "guide_parameters": {
+    "guide_radius": 1.5,
+    "door_visible_radius": 1.5,
+    "use_knn": true,
+    "knn_k": 5,
+    "knn_max_distance": 2.0,
+    "knn_filter_obstacles": true
+  },
+  
+  "exit_parameters": {
+    "door_size": 0.46,
+    "agent_size": 0.18
+  },
+  
+  "exits": [
+    {"x": 5.0, "y": 10.0, "z": 0.5, "description": "Top center (absolute coordinates)"},
+    {"x": 5.0, "y": 0.0, "z": 0.5, "description": "Bottom center (absolute coordinates)"},
+    {"x": 0.0, "y": 5.0, "z": 0.5, "description": "Left center (absolute coordinates)"},
+    {"x": 10.0, "y": 5.0, "z": 0.5, "description": "Right center (absolute coordinates)"}
+  ],
+  
+  "obstacles": [
+    {"type": "circle", "x": 4.0, "y": 2.0, "z": 0.5, "size": 0.3, "description": "Center circle (absolute coordinates)"},
+    {"type": "circle", "x": 2.0, "y": 8.0, "z": 0.5, "size": 0.6, "description": "Up circle (absolute coordinates)"},
+    {"type": "rectangle", "x": 7.2, "y": 3.4, "z": 0.5, "width": 3.2, "height": 0.8, "description": "Left-lower rectangle (absolute coordinates)"},
+    {"type": "rectangle", "x": 3.0, "y": 5.0, "z": 0.5, "width": 2.0, "height": 1.0, "description": "Left-upper rectangle (absolute coordinates)"},
+    {"type": "rectangle", "x": 7.0, "y": 7.0, "z": 0.5, "width": 1.5, "height": 1.5, "description": "Right-lower rectangle (absolute coordinates)"}
+  ],
+  
+  "simulation": {
+    "num_steps": 200,
+    "save_interval": 5,
+    "output_dir": "output/guided"
+  },
+  
+  "visualization": {
+    "fps": 10,
+    "gif_filename": "guided_animation.gif"
+  }
+}
