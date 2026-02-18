@@ -15,6 +15,7 @@
 - [Examples](#examples)
 - [Visualization Tools](#visualization-tools)
 - [Exit Visibility System](#exit-visibility-system)
+- [Guide Agent Training (RL)](#guide-agent-training-rl)
 - [Configuration](#configuration)
 - [Future Work](#future-work)
 - [Reference](#reference)
@@ -63,26 +64,26 @@ Our model can efficiently handle modeling of emergency evacuation in complex env
 - Improved collision handling with walls and other agents
 - Prevents agents from passing through walls or obstacles
 
-### 📐 Optimized Obstacle Visualization and Collision Detection
+### ⚡ Vectorized Simulation (NumPy)
 
-**Performance Improvements:**
-- Refactored obstacle visualization rendering for better clarity
-- Optimized collision detection algorithms for better performance
-- More accurate spatial partitioning and cell-based detection
-- Enhanced visual representation of obstacles in simulation
+**Performance (GuidedCellSpace):**
+- **region_confine**: Wall, obstacle, and friction forces computed in bulk (NumPy arrays) instead of per-particle Python loops.
+- **loop_cells / loop_neighbors**: Pairwise collision forces within and between cells use matrix operations (distance/force matrices) instead of double loops.
+- **Integration**: Leapfrog integration over all particles in one vectorized step.
+- For further speed: consider **Numba** (`@numba.jit` on hot loops) or **Cython** (compile pairwise force / integration into a `.pyx` module).
 
 ### 🚶 Guide Agent System (Stationary and Mobile)
 
 **Foundation for Intelligent Evacuation Guidance:**
 - **Stationary Guide Agents**: Fixed-position agents that help direct evacuees
-- **Mobile Guide Agents**: Agents capable of moving to optimize evacuation flow
-- Lays groundwork for future RL-based guide agent training
+- **Mobile Guide Agents**: RL-trained agents that move to optimize evacuation flow
+- **Actor-Critic (continuous action)** training via `train_guide.py`
 - Separate agent type with different behavioral rules
 
 **Current Status:**
 - Stationary guides are fully implemented and tested
-- Mobile guide framework is in place
-- Ready for reinforcement learning integration
+- Mobile guide RL training is implemented (state, reward, boundary penalty with observable position)
+- Guide state includes normalized position so the agent can learn where walls are; reward uses A* direction (obstacle-aware) and avoids noisy terms (no global evacuation progress, no “toward crowd” when the guide has no crowd state)
 
 ---
 
@@ -173,8 +174,7 @@ Emergency-evacuation-Deep-reinforcement-learning/
 - ✅ Wall and obstacle collision detection
 - ✅ Optimized visualization and rendering
 - ✅ Stationary guide agents
-- ✅ Mobile guide agent framework
-- 🔜 RL-based guide agent training (in progress)
+- ✅ Mobile guide agent framework and RL training (Actor-Critic, see Guide Agent Training section)
 
 **Files:**
 - `evacuation_rl/agents/guided_agents/environment.py` - Main environment implementation
@@ -190,11 +190,13 @@ Emergency-evacuation-Deep-reinforcement-learning/
 **Current Status:**
 - ✅ Framework implemented
 - ✅ Stationary guides working
-- ✅ Mobile guide structure in place
-- 🔜 RL-based training (planned)
+- ✅ Mobile guide RL training (Actor-Critic) in `train_guide.py`
+- ✅ 6D state (distance, A* direction, n_in_range, x_norm, y_norm) and reward design documented in README
 
 **Files:**
-- Integrated in `evacuation_rl/agents/guided_agents/environment.py`
+- `train_guide.py` — Guide RL training (Actor-Critic)
+- `evacuation_rl/agents/guided_agents/environment.py` — Guided simulation
+- `evacuation_rl/environments/cellspace.py` — `get_guide_state()`, `get_guide_dense_reward()`, `get_guide_boundary_penalty()`, `get_exit_reward()`
 
 ---
 
@@ -292,9 +294,21 @@ config/with_obstacles.json       # With obstacles
 config/large_scale.json          # Large-scale simulation
 ```
 
-### 3. Train Guide Agents (Coming Soon)
+### 3. Train Guide Agents (RL)
 
-Guide agent training using RL will be implemented in future updates.
+Train the mobile guide with Actor-Critic (continuous action):
+
+```bash
+uv run python train_guide.py
+```
+
+Or with standard Python:
+
+```bash
+python train_guide.py
+```
+
+Reward terms and the 6-dimensional guide state are described in [Guide Agent Training (RL)](#guide-agent-training-rl). Config is in `config/simulation_config.json` under `train`.
 
 ### 4. View Available Commands
 
@@ -421,7 +435,44 @@ if avg_neighbor_velocity > crowd_threshold:
 Guide agents (stationary or mobile) help direct evacuees:
 - Positioned strategically near exits or in corridors  
 - Influence evacuee movement decisions
-- Future: Will be trained using RL to optimize positioning
+- Mobile guides are trained with Actor-Critic RL; state and reward are designed so the agent can learn wall positions and obstacle-aware directions
+
+---
+
+## Guide Agent Training (RL)
+
+The mobile guide is trained with **Actor-Critic** (continuous action). The following design keeps the reward and state consistent and learnable.
+
+### Guide State (6 dimensions)
+
+The guide observes a **6-dimensional state** (no global crowd or absolute world coordinates beyond normalized position):
+
+| Index | Name | Range / Type | Reason |
+|-------|------|--------------|--------|
+| 0 | `distance_to_exit_norm` | [0, 1] | A* path distance to nearest exit, normalized by domain diagonal. Lets the agent know how far the exit is along walkable paths. |
+| 1 | `astar_dir_x` | unit vector component | A* direction to nearest exit (x). Obstacle-aware; avoids rewarding straight-line movement through walls. |
+| 2 | `astar_dir_y` | unit vector component | A* direction to nearest exit (y). Same as above. |
+| 3 | `n_in_guide_range` | [0, 1] | Number of evacuees within the guide’s influence radius, normalized. Indicates whether the guide is “with” people (dense reward applies when above threshold). |
+| 4 | `x_norm` | [0, 1] | Guide’s x-position in the room, normalized by domain bounds. So the agent can **learn where walls are** (e.g. 0 and 1 = walls) and avoid boundary/corner penalties. |
+| 5 | `y_norm` | [0, 1] | Same for y. Together with `x_norm`, provides absolute position for learning wall and corner avoidance. |
+
+State is computed in `evacuation_rl/environments/cellspace.py` via `get_guide_state()`.
+
+### Guide Reward (per step)
+
+Total reward is the sum of the following (no global evacuation progress, no “move toward crowd” term):
+
+| Term | Formula / Behavior | Reason |
+|------|---------------------|--------|
+| **Exit reward** | `exit_reward_scale * get_exit_reward()` | Credits the guide for evacuees that just reached an exit, weighted by each evacuee’s `guide_influence`. Direct incentive for leading people out. |
+| **Boundary penalty** | `-get_guide_boundary_penalty(margin, penalty_scale, corner_extra_scale)` | Penalty when the guide is close to walls (distance to nearest wall &lt; margin); extra penalty near corners. **Learnable** because state includes `x_norm`, `y_norm`, so the agent can associate position with penalty. |
+| **Dense reward (toward exit)** | `+get_guide_dense_reward(...)` | When `n_in_guide_range >= n_in_range_threshold`, reward is proportional to how much the guide’s velocity aligns with the **A* direction** to the exit (not straight line). Gives a dense signal to move toward the exit along feasible paths when guiding people. When fewer evacuees are in range, dense reward is 0 (guide has no state about where the crowd is, so no “move toward crowd” reward). |
+
+**Intentionally not used:**
+- **Evacuation progress** (e.g. mean distance of all evacuees to exits): too noisy, since evacuees can reach exits on their own with some probability.
+- **Reward for moving toward crowd centroid** when few in range: the guide has no observation of global crowd position, so that term would be inconsistent and noisy.
+
+Config for training (e.g. scales, margin, threshold) is under `config/simulation_config.json` → `train`.
 
 ---
 
@@ -452,18 +503,16 @@ In `evacuation_rl/environments/cellspace.py`:
 
 ### 🎯 Planned Enhancements
 
-#### 1. RL-Based Guide Agent Training
-**Primary Goal:**
-- Train mobile guide agents using Deep Reinforcement Learning
-- Optimize guide agent positioning and movement strategies
-- Develop reward functions for effective evacuation guidance
-- Multi-agent coordination between guides and evacuees
+#### 1. RL-Based Guide Agent Training (Implemented)
+**Implemented:**
+- Mobile guide trained with **Actor-Critic** (continuous action) in `train_guide.py`
+- **State (6D):** A* distance to exit, A* direction (2D), evacuees in range (normalized), normalized position (x_norm, y_norm) so the agent can learn where walls are
+- **Reward:** exit reward (credit for evacuees reaching exit), boundary/corner penalty (learnable thanks to position in state), dense reward for moving toward exit in A* direction when many evacuees are in range (no global evacuation progress or “toward crowd” to reduce noise)
+- See [Guide Agent Training (RL)](#guide-agent-training-rl) for full reward and state documentation
 
-**Technical Approach:**
-- Extend DQN architecture for guide agent decision-making
-- State space: guide position, evacuee distribution, exit congestion
-- Action space: guide movement directions and influence radius
-- Reward design: minimize total evacuation time, prevent congestion
+**Possible Extensions:**
+- Multi-agent coordination between multiple guides
+- Tuning reward scales and exploration for different room layouts
 
 #### 2. Advanced Crowd Dynamics
 - Implement more sophisticated crowd psychology models
@@ -525,6 +574,6 @@ This is a graduate research project on critical decision making, focusing on eme
 - ✅ Stationary and mobile guide agent framework
 
 **Phase 2 (In Progress):**
-- 🔜 Deep RL training for guide agents
+- ✅ Deep RL training for guide agents (Actor-Critic; reward and state documented in README)
 - 🔜 Multi-agent guide coordination
 - 🔜 Advanced crowd dynamics modeling

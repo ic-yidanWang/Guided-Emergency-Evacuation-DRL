@@ -1,8 +1,9 @@
 """
 Actor-Critic module for training the guide agent.
 
-- State: [distance_to_exit_norm, astar_dir_x, astar_dir_y, n_in_guide_range] (4-dim, relative only).
-- Action: [vx, vy] in [-1, 1], interpreted as direction (normalized) and magnitude; env scales by max_guide_speed.
+- State: [distance_to_exit_norm, astar_dir_xy, n_in_guide_range, x_norm, y_norm] (6-dim).
+- Action: [vx, vy, confidence_logit]. vx, vy in [-1, 1]; confidence = sigmoid(confidence_logit) in (0, 1).
+  When confidence > threshold, trainer uses dedicated "go find" behavior instead of (vx, vy).
 """
 
 import numpy as np
@@ -21,9 +22,9 @@ def mlp(sizes, activation=nn.ReLU, output_activation=None):
 
 
 class Actor(nn.Module):
-    """Gaussian policy: state -> mean action (2), with learnable log_std for (vx, vy)."""
+    """Gaussian policy: state -> mean action (vx, vy, confidence_logit). First two tanh, third unbounded."""
 
-    def __init__(self, state_dim, action_dim=2, hidden_sizes=(64, 64), log_std_init=-0.5):
+    def __init__(self, state_dim, action_dim=3, hidden_sizes=(64, 64), log_std_init=-0.5):
         super().__init__()
         self.action_dim = action_dim
         self.net = mlp([state_dim] + list(hidden_sizes), output_activation=nn.Identity)
@@ -32,17 +33,23 @@ class Actor(nn.Module):
 
     def forward(self, s):
         x = self.net(s)
-        mean = torch.tanh(self.mean_layer(x))
+        mean_raw = self.mean_layer(x)
+        mean_vel = torch.tanh(mean_raw[:, :2])
+        mean_logit = mean_raw[:, 2:3]
+        mean = torch.cat([mean_vel, mean_logit], dim=1)
         std = torch.exp(self.log_std).expand_as(mean)
         return mean, std
 
     def get_action(self, s, deterministic=False):
         mean, std = self.forward(s)
         if deterministic:
-            return mean
+            out = mean.clone()
+            out[:, :2] = torch.clamp(out[:, :2], -1.0, 1.0)
+            return out
         dist = Normal(mean, std)
         a = dist.sample()
-        return torch.clamp(a, -1.0, 1.0)
+        a = torch.cat([torch.clamp(a[:, :2], -1.0, 1.0), a[:, 2:3]], dim=1)
+        return a
 
 
 class Critic(nn.Module):
@@ -57,9 +64,9 @@ class Critic(nn.Module):
 
 
 class ActorCritic(nn.Module):
-    """Actor + Critic for guide agent. state_dim = 4 (dist_to_exit, astar_dir_xy, n_in_range)."""
+    """Actor + Critic for guide agent. state_dim=6, action_dim=3 (vx, vy, confidence_logit)."""
 
-    def __init__(self, state_dim, action_dim=2, hidden_sizes=(64, 64), lr_actor=3e-4, lr_critic=1e-3, gamma=0.99, log_std_init=0.0):
+    def __init__(self, state_dim, action_dim=3, hidden_sizes=(64, 64), lr_actor=3e-4, lr_critic=1e-3, gamma=0.99, log_std_init=0.0):
         super().__init__()
         self.actor = Actor(state_dim, action_dim, hidden_sizes, log_std_init=log_std_init)
         self.critic = Critic(state_dim, hidden_sizes)

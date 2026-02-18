@@ -104,7 +104,8 @@ def setup_environment(config):
         guide_initial_position=config['guide_parameters'].get('guide_initial_position'),
         guide_influence_gain=config['guide_parameters'].get('guide_influence_gain', 2.0),
         guide_influence_decay=config['guide_parameters'].get('guide_influence_decay', 0.5),
-        follow_guide_distance_threshold=config['guide_parameters'].get('follow_guide_distance_threshold', 3.0)
+        follow_guide_distance_threshold=config['guide_parameters'].get('follow_guide_distance_threshold', 3.0),
+        follow_speed_scale_in_radius=config['guide_parameters'].get('follow_speed_scale_in_radius', 0.5)
     )
     
     print(f"\nEnvironment created:")

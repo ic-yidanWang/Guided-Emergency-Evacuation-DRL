@@ -33,14 +33,15 @@ def main():
     do_visualize = train_cfg.get('visualize', True) and not args.no_viz
     refresh_interval = int(train_cfg.get('refresh_interval', 10))
     max_guide_speed = float(train_cfg.get('max_guide_speed', 2.0))
-    reward_scale = float(train_cfg.get('reward_scale', -0.1))
     exit_reward_scale = float(train_cfg.get('exit_reward_scale', 2.0))
     guide_boundary_margin = float(train_cfg.get('guide_boundary_margin', 0.8))
     guide_boundary_penalty_scale = float(train_cfg.get('guide_boundary_penalty_scale', 0.5))
     guide_corner_penalty_scale = float(train_cfg.get('guide_corner_penalty_scale', 0.3))
-    n_in_range_threshold = float(train_cfg.get('n_in_range_threshold', 0.2))
+    n_in_range_count_threshold = int(train_cfg.get('n_in_range_count_threshold', 1))
     reward_toward_exit_scale = float(train_cfg.get('reward_toward_exit_scale', 0.1))
-    reward_toward_crowd_scale = float(train_cfg.get('reward_toward_crowd_scale', 0.1))
+    go_find_confidence_threshold = float(train_cfg.get('go_find_confidence_threshold', 0.5))
+    go_find_min_distance = float(train_cfg.get('go_find_min_distance', 3.0))
+    go_find_max_distance = float(train_cfg.get('go_find_max_distance', 5.0))
     episodes = int(train_cfg.get('episodes', 50))
     steps_per_episode = int(train_cfg.get('steps_per_episode', 200))
     lr_actor = float(train_cfg.get('lr_actor', 3e-4))
@@ -54,18 +55,18 @@ def main():
         print("Config has add_guide_agent=false. Enable it to train the guide.")
         return
 
-    # One env to get state_dim (depends on num exits)
     env = setup_environment(config)
     state = env.get_guide_state()
     if state is None:
         print("No guide or no exits in env. Cannot train.")
         return
     state_dim = state.shape[0]
-    print(f"State dim: {state_dim} (dist_to_exit, astar_dir_xy, n_in_range)")
+    print(f"State dim: {state_dim} (dist_to_exit, astar_dir_xy, n_in_range, x_norm, y_norm)")
+    print(f"Action: (vx, vy, confidence_logit); go_find if sigmoid(confidence) > {go_find_confidence_threshold}")
 
     agent = ActorCritic(
         state_dim=state_dim,
-        action_dim=2,
+        action_dim=3,
         hidden_sizes=(64, 64),
         lr_actor=lr_actor,
         lr_critic=lr_critic,
@@ -109,15 +110,20 @@ def main():
         noise_std = exploration_noise_std * (exploration_decay ** ep)
         for step in range(steps_per_episode):
             a = agent.get_action(s, deterministic=False)
-            a = a + noise_std * np.random.randn(2)
-            a = np.clip(a, -1.0, 1.0)
-            guide_actions = [[float(a[0]), float(a[1])]]
+            a = a + noise_std * np.random.randn(3)
+            a[0] = np.clip(a[0], -1.0, 1.0)
+            a[1] = np.clip(a[1], -1.0, 1.0)
+            confidence = 1.0 / (1.0 + np.exp(-float(a[2])))
+            if confidence > go_find_confidence_threshold:
+                dx, dy = env.get_guide_go_find_direction(min_distance=go_find_min_distance, max_distance=go_find_max_distance)
+                guide_actions = [[float(dx), float(dy)]]
+            else:
+                guide_actions = [[float(a[0]), float(a[1])]]
             done = env.step_guided(guide_actions=guide_actions, max_guide_speed=max_guide_speed)
-            r = (env.get_evacuation_reward(scale=reward_scale) + exit_reward_scale * env.get_exit_reward()
+            r = (exit_reward_scale * env.get_exit_reward()
                 - env.get_guide_boundary_penalty(margin=guide_boundary_margin, penalty_scale=guide_boundary_penalty_scale, corner_extra_scale=guide_corner_penalty_scale)
-                + env.get_guide_dense_reward(n_in_range_threshold=n_in_range_threshold,
-                    reward_toward_exit_scale=reward_toward_exit_scale,
-                    reward_toward_crowd_scale=reward_toward_crowd_scale))
+                + env.get_guide_dense_reward(n_in_range_count_threshold=n_in_range_count_threshold,
+                    reward_toward_exit_scale=reward_toward_exit_scale))
             s_next = env.get_guide_state()
             ep_reward += r
 

@@ -938,10 +938,12 @@ class GuidedCellSpace(Cell_Space):
                  knn_filter_obstacles=True, n_guide_agent=0,
                  guide_initial_position_mode='random', guide_initial_position=None,
                  guide_influence_gain=2.0, guide_influence_decay=0.5,
-                 follow_guide_distance_threshold=3.0):
+                 follow_guide_distance_threshold=3.0, follow_speed_scale_in_radius=0.5):
         self.n_guide_agent = max(0, int(n_guide_agent))
         self.guide_radius = guide_radius
         self.follow_guide_distance_threshold = max(0.0, float(follow_guide_distance_threshold))
+        # 圈内向 guide 靠近时速度的额外缩放 [0,1]，越小越不往 guide 中心挤
+        self.follow_speed_scale_in_radius = np.clip(float(follow_speed_scale_in_radius), 0.0, 1.0)
         self.guide_influence_gain = max(0.0, float(guide_influence_gain))
         self.guide_influence_decay = max(0.0, float(guide_influence_decay))
         self.guide_initial_position_mode = str(guide_initial_position_mode).strip().lower()
@@ -957,6 +959,155 @@ class GuidedCellSpace(Cell_Space):
         self.speed_scale = max(0.1, float(speed_scale))
         self.knn_max_distance = knn_max_distance
         self.knn_filter_obstacles = knn_filter_obstacles
+
+    def region_confine(self):
+        """Vectorized region confining: wall + obstacle + friction over all particles (faster than per-particle loop)."""
+        particles = []
+        for c in self.Cells:
+            for p in c.Particles:
+                particles.append(p)
+        if not particles:
+            return
+        N = len(particles)
+        pos = np.array([p.position for p in particles], dtype=np.float64)
+        vel = np.array([p.velocity for p in particles], dtype=np.float64)
+        mass = np.array([p.mass for p in particles], dtype=np.float64)
+        acc = np.zeros_like(pos)
+        ag = agent_size
+        # Wall forces (vectorized)
+        dis = np.empty((N, 3, 2))
+        dis[:, :, 0] = pos - self.L[:, 0]
+        dis[:, :, 1] = self.L[:, 1] - pos
+        dis_abs = np.abs(dis)
+        f = np.where(dis_abs < ag, f_wall_lim * np.exp((ag - dis_abs) / 0.08) * dis_abs, 0.0)
+        f[:, :, 1] = -f[:, :, 1]
+        acc += f.sum(axis=2) / mass[:, np.newaxis]
+        # Obstacle forces (loop obstacles, vectorized over particles)
+        if hasattr(self, 'obstacle_configs') and self.obstacle_configs:
+            for obs_cfg in self.obstacle_configs:
+                obs_type = obs_cfg.get('type', 'circle')
+                if obs_type == 'circle':
+                    center = np.array([obs_cfg['x'], obs_cfg['y'], obs_cfg.get('z', 0.5)], dtype=np.float64)
+                    radius = float(obs_cfg.get('size', 0.5))
+                    dr = pos - center
+                    dis_to_center = np.sqrt(np.sum(dr[:, :2] ** 2, axis=1)) + 1e-10
+                    dis_to_boundary = dis_to_center - radius
+                    mask = dis_to_boundary < ag
+                    force_mult = np.where(dis_to_boundary < 0, 5.0, 1.0)
+                    penetration = np.maximum(ag - dis_to_boundary, 0)
+                    f_mag = np.where(mask, f_collision_lim * force_mult * np.exp(penetration / 0.05), 0.0)
+                    dir_2d = dr[:, :2] / (dis_to_center[:, np.newaxis] + 1e-10)
+                    f_vec = np.zeros((N, 3))
+                    f_vec[:, :2] = f_mag[:, np.newaxis] * dir_2d
+                    acc += f_vec / mass[:, np.newaxis]
+                elif obs_type == 'rectangle':
+                    cx, cy = obs_cfg['x'], obs_cfg['y']
+                    w, h = obs_cfg.get('width', 0.4), obs_cfg.get('height', 0.3)
+                    left, right = cx - w / 2, cx + w / 2
+                    bottom, top = cy - h / 2, cy + h / 2
+                    closest_x = np.clip(pos[:, 0], left, right)
+                    closest_y = np.clip(pos[:, 1], bottom, top)
+                    dr_2d = pos[:, :2] - np.column_stack([closest_x, closest_y])
+                    dis_rect = np.sqrt(np.sum(dr_2d ** 2, axis=1)) + 1e-10
+                    is_inside = (pos[:, 0] >= left) & (pos[:, 0] <= right) & (pos[:, 1] >= bottom) & (pos[:, 1] <= top)
+                    dist_to_edges = np.minimum(
+                        np.minimum(pos[:, 0] - left, right - pos[:, 0]),
+                        np.minimum(pos[:, 1] - bottom, top - pos[:, 1])
+                    )
+                    penetration = np.where(is_inside, ag - dist_to_edges, np.maximum(ag - dis_rect, 0))
+                    mask = (dis_rect < ag) | is_inside
+                    force_mult = np.where(is_inside, 5.0, 1.0)
+                    f_mag = np.where(mask, f_collision_lim * force_mult * np.exp(penetration / 0.05), 0.0)
+                    f_vec = np.zeros((N, 3))
+                    f_vec[:, :2] = f_mag[:, np.newaxis] * (dr_2d / (dis_rect[:, np.newaxis] + 1e-10))
+                    acc += f_vec / mass[:, np.newaxis]
+        # Friction (vectorized)
+        acc += (-mass[:, np.newaxis] / relaxation_time * vel) / mass[:, np.newaxis]
+        # Penetration correction: keep per-particle (few particles need it)
+        for i, p in enumerate(particles):
+            penetration_depth, correction_vec = self._get_obstacle_penetration_depth(p.position, ag)
+            if penetration_depth > ag * 0.5:
+                acc[i] += correction_vec * f_collision_lim * 10.0 / p.mass
+        for i, p in enumerate(particles):
+            p.acc += acc[i]
+
+    def _loop_cells_vectorized(self):
+        """Vectorized pairwise forces within each cell (matrix ops instead of Python double loop)."""
+        ag = agent_size
+        for c in self.Cells:
+            parts = c.Particles
+            L = len(parts)
+            if L < 2:
+                continue
+            pos = np.array([p.position for p in parts], dtype=np.float64)
+            mass = np.array([p.mass for p in parts], dtype=np.float64)
+            dr = pos[:, np.newaxis, :] - pos[np.newaxis, :, :]
+            dis = np.sqrt(np.sum(dr ** 2, axis=2)) + 1e-10
+            np.fill_diagonal(dis, np.inf)
+            mask = dis < ag
+            f_mag = np.where(mask, f_collision_lim * np.exp((ag - dis) / 0.08), 0.0)
+            F = f_mag[:, :, np.newaxis] * dr / (dis[:, :, np.newaxis] + 1e-10)
+            F_net = F.sum(axis=1)
+            for i, p in enumerate(parts):
+                p.acc += F_net[i] / p.mass
+
+    def _loop_neighbors_vectorized(self):
+        """Vectorized pairwise forces between each cell and its neighbor cells."""
+        ag = agent_size
+        for c in self.Cells:
+            p1_list = c.Particles
+            for n in c.Neighbors:
+                p2_list = self.Cells[n].Particles
+                if not p1_list or not p2_list:
+                    continue
+                pos1 = np.array([p.position for p in p1_list], dtype=np.float64)
+                pos2 = np.array([p.position for p in p2_list], dtype=np.float64)
+                mass1 = np.array([p.mass for p in p1_list], dtype=np.float64)
+                mass2 = np.array([p.mass for p in p2_list], dtype=np.float64)
+                L1, L2 = len(p1_list), len(p2_list)
+                dr = pos1[:, np.newaxis, :] - pos2[np.newaxis, :, :]
+                dis = np.sqrt(np.sum(dr ** 2, axis=2)) + 1e-10
+                mask = dis < ag
+                f_mag = np.where(mask, f_collision_lim * np.exp((ag - dis) / 0.08), 0.0)
+                F = f_mag[:, :, np.newaxis] * dr / (dis[:, :, np.newaxis] + 1e-10)
+                F_net1 = F.sum(axis=1)
+                F_net2 = -F.sum(axis=0)
+                for i, p in enumerate(p1_list):
+                    p.acc += F_net1[i] / p.mass
+                for j, p in enumerate(p2_list):
+                    p.acc += F_net2[j] / p.mass
+
+    def loop_cells(self):
+        """Override: use vectorized pairwise forces within cells."""
+        self._loop_cells_vectorized()
+
+    def loop_neighbors(self):
+        """Override: use vectorized pairwise forces between neighbor cells."""
+        self._loop_neighbors_vectorized()
+
+    def Integration(self, stage):
+        """Override: vectorized leapfrog over all particles (avoids Python per-particle loop)."""
+        particles = []
+        for c in self.Cells:
+            for p in c.Particles:
+                particles.append(p)
+        if not particles:
+            self.T = 0.0
+            return
+        pos = np.array([p.position for p in particles], dtype=np.float64)
+        vel = np.array([p.velocity for p in particles], dtype=np.float64)
+        acc = np.array([p.acc for p in particles], dtype=np.float64)
+        mass = np.array([p.mass for p in particles], dtype=np.float64)
+        dt = self.dt
+        if stage == 0:
+            vel += dt / 2 * acc
+            pos += dt * vel
+        else:
+            vel = vel + dt / 2 * acc
+        for i, p in enumerate(particles):
+            p.velocity = vel[i]
+            p.position = pos[i]
+        self.T = float(0.5 * np.sum(mass * np.sum(vel ** 2, axis=1)) / len(particles))
     
     def _check_obstacle_collision(self, pos, agent_size):
         """Check if position collides with any obstacle (using true geometric shapes)
@@ -1983,37 +2134,34 @@ class GuidedCellSpace(Cell_Space):
         
         return None
 
-    def _knn_direction_and_variance(self, particle, k):
+    def _knn_direction_and_variance(self, particle, k, search_cells=None):
         """
         Get direction informed by KNN neighbors with enhanced randomness.
-        
-        Behavior for agents who DON'T see exits yet:
-        1. Follow neighbors primarily (60%)
-        2. Random walk component (40%)
-        3. Large speed variance noise for realistic uncertainty
-        
+        If search_cells is provided, search there first; if fewer than k neighbors
+        are found, fall back to searching all cells (avoids too few neighbors in sparse regions).
+
         KNN filtering:
         - Only considers neighbors within knn_max_distance
         - If knn_filter_obstacles is True, excludes neighbors blocked by obstacles
         """
-        neighbors = []
+        def collect_neighbors(cells_to_search):
+            out = []
+            for c in cells_to_search:
+                for p in c.Particles:
+                    if p.ID == particle.ID:
+                        continue
+                    dist = np.sqrt(np.sum((p.position - particle.position) ** 2))
+                    if dist > self.knn_max_distance:
+                        continue
+                    if self.knn_filter_obstacles and self._is_line_of_sight_blocked(particle.position, p.position):
+                        continue
+                    out.append((dist, p))
+            return out
 
-        for c in self.Cells:
-            for p in c.Particles:
-                if p.ID == particle.ID:
-                    continue
-
-                dist = np.sqrt(np.sum((p.position - particle.position) ** 2))
-                
-                # Filter 1: Maximum distance threshold
-                if dist > self.knn_max_distance:
-                    continue
-                
-                # Filter 2: Line of sight blocked by obstacles
-                if self.knn_filter_obstacles and self._is_line_of_sight_blocked(particle.position, p.position):
-                    continue
-                
-                neighbors.append((dist, p))
+        neighbors = collect_neighbors(search_cells) if search_cells is not None else collect_neighbors(self.Cells)
+        # 局部格子邻居不足 k 个时，用全局搜索保证有足够邻居
+        if search_cells is not None and len(neighbors) < k:
+            neighbors = collect_neighbors(self.Cells)
 
         # Get exit direction (but use it less for uncertain agents)
         exit_vector, _ = self._nearest_exit_vector(particle)
@@ -2074,8 +2222,8 @@ class GuidedCellSpace(Cell_Space):
                     return p.position.copy()
         return None
 
-    def _count_evacuees_in_guide_range(self, guide_pos, max_norm=100.0):
-        """Count evacuees within guide_radius of guide_pos. Returns normalized count in [0, 1] by max_norm."""
+    def _count_evacuees_in_guide_range_raw(self, guide_pos):
+        """Count evacuees within guide_radius of guide_pos. Returns integer count."""
         n = 0
         for c in self.Cells:
             for p in c.Particles:
@@ -2084,6 +2232,11 @@ class GuidedCellSpace(Cell_Space):
                 dist = np.sqrt(np.sum((p.position - guide_pos) ** 2))
                 if dist <= self.guide_radius:
                     n += 1
+        return n
+
+    def _count_evacuees_in_guide_range(self, guide_pos, max_norm=100.0):
+        """Count evacuees within guide_radius of guide_pos. Returns normalized count in [0, 1] by max_norm."""
+        n = self._count_evacuees_in_guide_range_raw(guide_pos)
         return min(1.0, float(n) / max(1.0, max_norm))
 
     def _evacuee_centroid_xy(self):
@@ -2102,12 +2255,9 @@ class GuidedCellSpace(Cell_Space):
 
     def get_guide_state(self, normalize=True, n_particle_norm=100.0):
         """
-        Get state for the first guide agent: relative info only (no absolute position, no global crowd).
-        [distance_to_exit_norm, astar_dir_x, astar_dir_y, n_in_guide_range]. 4-dimensional.
-        - distance_to_exit_norm: A* path distance to nearest exit (walkable), normalized by domain diagonal (roughly [0,1]).
-        - astar_dir_xy: A* best direction (unit vector) toward nearest exit, obstacle-aware.
-        - n_in_guide_range: count of evacuees in guide_radius, normalized to [0,1].
-        Returns None if no guide or no exits, else np.array of shape (4,).
+        Get state for the first guide agent.
+        [distance_to_exit_norm, astar_dir_x, astar_dir_y, n_in_guide_range, x_norm, y_norm]. 6-dimensional.
+        Returns None if no guide or no exits.
         """
         guide_pos = None
         for c in self.Cells:
@@ -2124,8 +2274,54 @@ class GuidedCellSpace(Cell_Space):
         distance_norm = float(np.clip(dist_to_exit / diag, 0.0, 1.0)) if normalize else float(dist_to_exit)
         n_particle_norm = getattr(self, 'n_particle_initial', n_particle_norm)
         n_in_range = self._count_evacuees_in_guide_range(guide_pos, max_norm=n_particle_norm)
-        state = np.array([np.float32(distance_norm), np.float32(astar_dx), np.float32(astar_dy), np.float32(n_in_range)], dtype=np.float32)
-        return state
+        xmin, xmax = float(self.L[0, 0]), float(self.L[0, 1])
+        ymin, ymax = float(self.L[1, 0]), float(self.L[1, 1])
+        x_span = xmax - xmin + 1e-10
+        y_span = ymax - ymin + 1e-10
+        x_norm = float(np.clip((guide_pos[0] - xmin) / x_span, 0.0, 1.0))
+        y_norm = float(np.clip((guide_pos[1] - ymin) / y_span, 0.0, 1.0))
+        return np.array([
+            np.float32(distance_norm), np.float32(astar_dx), np.float32(astar_dy), np.float32(n_in_range),
+            np.float32(x_norm), np.float32(y_norm),
+        ], dtype=np.float32)
+
+    def get_guide_position(self):
+        """Return (x, y) of the first guide agent, or None if no guide."""
+        for c in self.Cells:
+            for p in c.Particles:
+                if getattr(p, 'is_guide', False):
+                    return (float(p.position[0]), float(p.position[1]))
+        return None
+
+    def get_guide_go_find_direction(self, min_distance=3.0, max_distance=5.0):
+        """
+        Used when guide chooses "go find people": pick a random point far from the guide, then return
+        unit direction toward it (A* first segment if path exists, else straight). Obstacle-aware.
+        Returns (dx, dy) unit vector, or (0, 0) if no guide.
+        """
+        pos = self.get_guide_position()
+        if pos is None:
+            return (0.0, 0.0)
+        xmin, xmax = float(self.L[0, 0]), float(self.L[0, 1])
+        ymin, ymax = float(self.L[1, 0]), float(self.L[1, 1])
+        margin = 0.5
+        theta = np.random.uniform(0, 2 * np.pi)
+        dist = np.random.uniform(min_distance, max_distance)
+        tx = pos[0] + dist * np.cos(theta)
+        ty = pos[1] + dist * np.sin(theta)
+        tx = np.clip(tx, xmin + margin, xmax - margin)
+        ty = np.clip(ty, ymin + margin, ymax - margin)
+        start_xy = (pos[0], pos[1])
+        goal_xy = (tx, ty)
+        path = self._astar_path(start_xy, goal_xy)
+        if path and len(path) >= 2:
+            dx = path[1][0] - path[0][0]
+            dy = path[1][1] - path[0][1]
+        else:
+            dx = goal_xy[0] - start_xy[0]
+            dy = goal_xy[1] - start_xy[1]
+        n = np.sqrt(dx * dx + dy * dy) + 1e-10
+        return (dx / n, dy / n)
 
     def get_all_positions_for_vis(self):
         """Return (agents_xy, guide_agents_xy) as lists of [x, y, z] for visualization."""
@@ -2223,12 +2419,11 @@ class GuidedCellSpace(Cell_Space):
             return 0.0
         return scale * (total / n)
 
-    def get_guide_dense_reward(self, n_in_range_threshold=0.2, reward_toward_exit_scale=0.1,
-                               reward_toward_crowd_scale=0.1):
+    def get_guide_dense_reward(self, n_in_range_count_threshold=1, reward_toward_exit_scale=0.1):
         """
-        Denser reward for guide: when many evacuees in range, reward moving toward exit;
-        when few in range, reward moving toward the crowd (centroid of evacuees).
-        Uses current guide velocity and positions. Call after step_guided().
+        Dense reward for guide. Call after step_guided().
+        Only when 圈内人数 >= n_in_range_count_threshold: reward moving toward exit (A* direction).
+        When alone (圈内无人): return 0 (no reward shaping for "go find"; that is handled by actor confidence + get_guide_go_find_direction).
         """
         guide_pos = None
         guide_velocity = None
@@ -2240,43 +2435,22 @@ class GuidedCellSpace(Cell_Space):
                     break
             if guide_pos is not None:
                 break
-        if guide_pos is None or not self.Exit:
+        if guide_pos is None:
             return 0.0
-        n_in_range = self._count_evacuees_in_guide_range(
-            guide_pos, max_norm=getattr(self, 'n_particle_initial', 100.0))
+        n_in_range_raw = self._count_evacuees_in_guide_range_raw(guide_pos)
+        if n_in_range_raw < n_in_range_count_threshold or not self.Exit:
+            return 0.0
         speed_xy = np.sqrt(np.sum(guide_velocity ** 2)) + 1e-10
         if speed_xy < 1e-8:
             return 0.0
-        # Normalize velocity to unit direction for dot product (reward scales with alignment, not raw speed)
         vel_dir = guide_velocity / speed_xy
-        if n_in_range >= n_in_range_threshold:
-            # Many nearby: reward moving toward nearest exit
-            nearest_exit = min(self.Exit, key=lambda e: np.sqrt(np.sum((guide_pos - e) ** 2)))
-            to_exit = (nearest_exit[:2] - guide_pos[:2])
-            n_to = np.linalg.norm(to_exit) + 1e-10
-            if n_to < 1e-8:
-                return 0.0
-            dir_to_exit = to_exit / n_to
-            return reward_toward_exit_scale * float(np.dot(vel_dir, dir_to_exit))
-        else:
-            # Few nearby: reward moving toward crowd (centroid of evacuees)
-            cx, cy, count = 0.0, 0.0, 0
-            for c in self.Cells:
-                for p in c.Particles:
-                    if getattr(p, 'is_guide', False):
-                        continue
-                    cx += p.position[0]
-                    cy += p.position[1]
-                    count += 1
-            if count == 0:
-                return 0.0
-            cx, cy = cx / count, cy / count
-            to_crowd = np.array([cx - guide_pos[0], cy - guide_pos[1]])
-            n_to = np.linalg.norm(to_crowd) + 1e-10
-            if n_to < 1e-8:
-                return 0.0
-            dir_to_crowd = to_crowd / n_to
-            return reward_toward_crowd_scale * float(np.dot(vel_dir, dir_to_crowd))
+        _, astar_dx, astar_dy = self._astar_distance_and_direction_from_xy(guide_pos[0], guide_pos[1])
+        dir_to_exit = np.array([astar_dx, astar_dy], dtype=np.float64)
+        n_to = np.linalg.norm(dir_to_exit) + 1e-10
+        if n_to < 1e-8:
+            return 0.0
+        dir_to_exit = dir_to_exit / n_to
+        return reward_toward_exit_scale * float(np.dot(vel_dir, dir_to_exit))
 
     def _is_guided(self, particle):
         for c in self.Cells:
@@ -2310,7 +2484,9 @@ class GuidedCellSpace(Cell_Space):
 
         self._exit_reward_this_step = 0.0
         self.Zero_acc()
-        self.update_visibility_system()  # Update exit visibility based on path congestion
+        # Visibility update is expensive (BFS per cell); do every 5 steps
+        if getattr(self, '_debug_step_count', 0) % 5 == 0:
+            self.update_visibility_system()
 
         self.region_confine()
         self.loop_cells()
@@ -2318,6 +2494,13 @@ class GuidedCellSpace(Cell_Space):
 
         debug_step = getattr(self, '_debug_step_count', 0)
         self._debug_step_count = debug_step + 1
+
+        # Cache guide positions once (avoid O(N^2) _is_guided / _get_guiding_guide_position per step)
+        _guide_positions = []
+        for _c in self.Cells:
+            for _p in _c.Particles:
+                if getattr(_p, 'is_guide', False):
+                    _guide_positions.append(_p.position.copy())
 
         guide_idx = 0
         for c in self.Cells:
@@ -2335,7 +2518,14 @@ class GuidedCellSpace(Cell_Space):
 
                 # Evacuee particles: collision avoidance + exit / KNN + noise movement
                 exit_vector, exit_dist = self._nearest_exit_vector(p)
-                is_guided_by_agent = self._is_guided(p)
+                is_guided_by_agent = False
+                _guiding_pos = None
+                for gp in _guide_positions:
+                    d = np.sqrt(np.sum((p.position[:2] - gp[:2]) ** 2))
+                    if d <= self.guide_radius:
+                        is_guided_by_agent = True
+                        _guiding_pos = gp
+                        break
 
                 # Update guide_influence: increase while under guide, decay when not
                 inf = getattr(p, 'guide_influence', 0.0)
@@ -2356,7 +2546,7 @@ class GuidedCellSpace(Cell_Space):
                 elif is_guided_by_agent:
                     # When far from exit: follow the guide (stay beside guide); when close: go to exit
                     if exit_dist > self.follow_guide_distance_threshold:
-                        guide_pos = self._get_guiding_guide_position(p)
+                        guide_pos = _guiding_pos
                         if guide_pos is not None:
                             to_guide = guide_pos - p.position
                             to_guide[2] = 0.0
@@ -2364,8 +2554,8 @@ class GuidedCellSpace(Cell_Space):
                             move_vector = to_guide / dist_to_guide  # 3D (z=0) for _best_action_for_direction
                             # Already inside the circle: don't squeeze in, ease off speed toward guide
                             if dist_to_guide < self.guide_radius:
-                                # Scale speed by distance so near edge = normal, near center = slow
-                                follow_speed_scale = dist_to_guide / self.guide_radius
+                                # Scale speed by distance and follow_speed_scale_in_radius (降低圈内向 guide 靠近程度)
+                                follow_speed_scale = (dist_to_guide / self.guide_radius) * self.follow_speed_scale_in_radius
                                 desired_speed = desire_velocity * self.speed_scale * follow_speed_scale
                             else:
                                 desired_speed = desire_velocity * self.speed_scale
@@ -2384,9 +2574,10 @@ class GuidedCellSpace(Cell_Space):
                     desired_speed = desire_velocity * self.speed_scale
                     best_action = self._best_action_for_direction(move_vector)
                 else:
-                    # Far from exits: KNN + noise for evacuees
+                    # Far from exits: KNN + noise for evacuees (search only same+neighbor cells for speed)
                     if self.use_knn:
-                        move_vector, speed_variance = self._knn_direction_and_variance(p, self.knn_k)
+                        search_cells = [c] + [self.Cells[n] for n in c.Neighbors]
+                        move_vector, speed_variance = self._knn_direction_and_variance(p, self.knn_k, search_cells=search_cells)
                         noise = np.random.normal(0.0, np.sqrt(speed_variance * 2.0))
                         desired_speed = max(0.1, (desire_velocity + noise) * self.speed_scale)
                         best_action = self._best_action_for_direction(move_vector)
