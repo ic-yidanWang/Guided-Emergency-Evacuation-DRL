@@ -760,11 +760,11 @@ class Cell_Space:
         """Apply region confining forces: walls, obstacles and friction (OPTIMIZED)"""
         for c in self.Cells:
             for p in c.Particles:
-                # Wall forces
-                dis = p.position[:, np.newaxis] - self.L    
+                # Wall forces (same strength curve as obstacles: strong when close)
+                dis = p.position[:, np.newaxis] - self.L
                 dis = np.abs(dis)
-                f = np.where(dis < agent_size, 
-                           f_wall_lim * np.exp((agent_size - dis) / 0.08) * dis, 0.) 
+                penetration = np.maximum(agent_size - dis, 0.0)
+                f = np.where(dis < agent_size, f_wall_lim * np.exp(penetration / 0.05), 0.)
                 f[:, 1] = -f[:, 1]
                 f = f.sum(axis=1)
                 
@@ -974,12 +974,13 @@ class GuidedCellSpace(Cell_Space):
         mass = np.array([p.mass for p in particles], dtype=np.float64)
         acc = np.zeros_like(pos)
         ag = agent_size
-        # Wall forces (vectorized)
+        # Wall forces (vectorized): same form as obstacle repulsion (no * dis_abs so force stays strong when close)
         dis = np.empty((N, 3, 2))
         dis[:, :, 0] = pos - self.L[:, 0]
         dis[:, :, 1] = self.L[:, 1] - pos
         dis_abs = np.abs(dis)
-        f = np.where(dis_abs < ag, f_wall_lim * np.exp((ag - dis_abs) / 0.08) * dis_abs, 0.0)
+        penetration_wall = np.maximum(ag - dis_abs, 0.0)
+        f = np.where(dis_abs < ag, f_wall_lim * np.exp(penetration_wall / 0.05), 0.0)
         f[:, :, 1] = -f[:, :, 1]
         acc += f.sum(axis=2) / mass[:, np.newaxis]
         # Obstacle forces (loop obstacles, vectorized over particles)
@@ -1388,11 +1389,12 @@ class GuidedCellSpace(Cell_Space):
         return total_force
     
     def apply_wall_forces_to_particle(self, p):
-        """Apply wall (domain boundary) repulsive forces to a single particle. Modifies p.acc in-place."""
+        """Apply wall (domain boundary) repulsive forces to a single particle. Modifies p.acc in-place.
+        Same strength curve as obstacles (no * dis so force stays strong when close to wall)."""
         dis = p.position[:, np.newaxis] - self.L
         dis = np.abs(dis)
-        f = np.where(dis < agent_size,
-                     f_wall_lim * np.exp((agent_size - dis) / 0.08) * dis, 0.)
+        penetration = np.maximum(agent_size - dis, 0.0)
+        f = np.where(dis < agent_size, f_wall_lim * np.exp(penetration / 0.05), 0.)
         f[:, 1] = -f[:, 1]
         f = f.sum(axis=1)
         p.acc += f / p.mass
@@ -1618,6 +1620,11 @@ class GuidedCellSpace(Cell_Space):
         self.Number = self.n_particle_initial
         self.Total = self.n_particle_initial
         self.initialize_particles(file=None, quiet=quiet)
+        # Clear go_find target cache so new episode gets fresh target
+        if hasattr(self, '_go_find_steps_remaining'):
+            self._go_find_steps_remaining = 0
+        if hasattr(self, '_go_find_target_xy'):
+            self._go_find_target_xy = None
 
     def _line_intersects_circle(self, p1, p2, center, radius):
         """
@@ -2293,15 +2300,34 @@ class GuidedCellSpace(Cell_Space):
                     return (float(p.position[0]), float(p.position[1]))
         return None
 
-    def get_guide_go_find_direction(self, min_distance=3.0, max_distance=5.0):
+    def get_guide_go_find_direction(self, min_distance=3.0, max_distance=5.0, stick_steps=5):
         """
-        Used when guide chooses "go find people": pick a random point far from the guide, then return
-        unit direction toward it (A* first segment if path exists, else straight). Obstacle-aware.
+        Used when guide chooses "go find people": pick a target point and return unit direction
+        toward it (A* first segment from current position if path exists, else straight). Obstacle-aware.
+        When stick_steps > 0, cache the target and reuse it: each step recompute direction from
+        current position to the same target, then decrement counter. Smoother than direction cache.
         Returns (dx, dy) unit vector, or (0, 0) if no guide.
         """
         pos = self.get_guide_position()
         if pos is None:
             return (0.0, 0.0)
+        remaining = getattr(self, '_go_find_steps_remaining', 0)
+        target = getattr(self, '_go_find_target_xy', None)
+        if stick_steps > 0 and remaining > 0 and target is not None:
+            # Reuse cached target: direction from current pos to target (recompute each step)
+            start_xy = (pos[0], pos[1])
+            goal_xy = target
+            path = self._astar_path(start_xy, goal_xy)
+            if path and len(path) >= 2:
+                dx = path[1][0] - path[0][0]
+                dy = path[1][1] - path[0][1]
+            else:
+                dx = goal_xy[0] - start_xy[0]
+                dy = goal_xy[1] - start_xy[1]
+            n = np.sqrt(dx * dx + dy * dy) + 1e-10
+            self._go_find_steps_remaining = remaining - 1
+            return (float(dx / n), float(dy / n))
+        # Pick new target
         xmin, xmax = float(self.L[0, 0]), float(self.L[0, 1])
         ymin, ymax = float(self.L[1, 0]), float(self.L[1, 1])
         margin = 0.5
@@ -2321,7 +2347,10 @@ class GuidedCellSpace(Cell_Space):
             dx = goal_xy[0] - start_xy[0]
             dy = goal_xy[1] - start_xy[1]
         n = np.sqrt(dx * dx + dy * dy) + 1e-10
-        return (dx / n, dy / n)
+        if stick_steps > 0:
+            self._go_find_target_xy = (float(tx), float(ty))
+            self._go_find_steps_remaining = stick_steps - 1
+        return (float(dx / n), float(dy / n))
 
     def get_all_positions_for_vis(self):
         """Return (agents_xy, guide_agents_xy) as lists of [x, y, z] for visualization."""
@@ -2419,11 +2448,57 @@ class GuidedCellSpace(Cell_Space):
             return 0.0
         return scale * (total / n)
 
+    def get_guide_reward_toward_crowd(self, reward_toward_crowd_scale=0.1, n_in_range_count_threshold=1, go_find_alone_bonus_scale=2.0):
+        """
+        Reward for moving toward evacuee centroid when 圈内人数 < threshold (go_find regime).
+        When 圈内人数 == 0 (alone), multiply by go_find_alone_bonus_scale so go_find gets stronger signal.
+        Call after step_guided().
+        """
+        guide_pos = None
+        guide_velocity = None
+        for c in self.Cells:
+            for p in c.Particles:
+                if getattr(p, 'is_guide', False):
+                    guide_pos = p.position.copy()
+                    guide_velocity = np.array(p.velocity[:2])
+                    break
+            if guide_pos is not None:
+                break
+        if guide_pos is None:
+            return 0.0
+        n_in_range_raw = self._count_evacuees_in_guide_range_raw(guide_pos)
+        if n_in_range_raw >= n_in_range_count_threshold:
+            return 0.0
+        # Compute centroid of all evacuees (non-guide)
+        sx, sy, n = 0.0, 0.0, 0
+        for c in self.Cells:
+            for p in c.Particles:
+                if getattr(p, 'is_guide', False):
+                    continue
+                sx += p.position[0]
+                sy += p.position[1]
+                n += 1
+        if n == 0:
+            return 0.0
+        cx, cy = sx / n, sy / n
+        dx = cx - guide_pos[0]
+        dy = cy - guide_pos[1]
+        dist = np.sqrt(dx * dx + dy * dy) + 1e-10
+        dir_to_crowd = np.array([dx / dist, dy / dist], dtype=np.float64)
+        speed_xy = np.sqrt(np.sum(guide_velocity ** 2)) + 1e-10
+        if speed_xy < 1e-8:
+            return 0.0
+        vel_dir = guide_velocity / speed_xy
+        raw = reward_toward_crowd_scale * float(np.dot(vel_dir, dir_to_crowd))
+        if n_in_range_raw == 0:
+            raw *= go_find_alone_bonus_scale
+        return raw
+
     def get_guide_dense_reward(self, n_in_range_count_threshold=1, reward_toward_exit_scale=0.1):
         """
         Dense reward for guide. Call after step_guided().
         Only when 圈内人数 >= n_in_range_count_threshold: reward moving toward exit (A* direction).
-        When alone (圈内无人): return 0 (no reward shaping for "go find"; that is handled by actor confidence + get_guide_go_find_direction).
+        When alone (圈内无人): return 0; use get_guide_reward_toward_crowd for go_find signal.
         """
         guide_pos = None
         guide_velocity = None

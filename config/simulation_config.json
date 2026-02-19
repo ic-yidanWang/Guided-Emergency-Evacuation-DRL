@@ -34,7 +34,7 @@
     "guide_influence_gain": 2.0,
     "guide_influence_decay": 0.5,
     "follow_guide_distance_threshold": 2.0,
-    "follow_speed_scale_in_radius": 0.5
+    "follow_speed_scale_in_radius": 0.7
   },
   
   "exit_parameters": {
@@ -51,7 +51,7 @@
     {"type": "rectangle", "x": 2.5, "y": 4.0, "z": 0.5, "width": 1.2, "height": 1.5, "description": "Left corridor obstacle (extra detour)"},
     {"type": "rectangle", "x": 7.5, "y": 4.0, "z": 0.5, "width": 2.2, "height": 0.5, "description": "Right corridor obstacle (extra detour)"},
     {"type": "rectangle", "x": 4.0, "y": 9.8, "z": 0.5, "width": 0.4, "height": 1.0, "description": "Exit corner top"},
-    {"type": "rectangle", "x": 4.0, "y": 6.5, "z": 0.5, "width": 2.7, "height": 0.8, "description": "Exit corner bottom"},
+    {"type": "rectangle", "x": 4.0, "y": 6.5, "z": 0.5, "width": 3.0, "height": 0.8, "description": "Exit corner bottom"},
     {"type": "rectangle", "x": 6.0, "y": 8.5, "z": 0.5, "width": 1.2, "height": 3.0, "description": "Exit corner right"}
   ],
   
@@ -77,16 +77,43 @@
     "guide_corner_penalty_scale": 0.3,
     "n_in_range_count_threshold": 1,
     "reward_toward_exit_scale": 0.1,
+    "reward_toward_crowd_scale": 0.1,
     "go_find_confidence_threshold": 0.5,
     "go_find_min_distance": 3.0,
     "go_find_max_distance": 5.0,
-    "episodes": 50,
+    "go_find_stick_steps": 5,
+    "go_find_alone_bonus_scale": 2.0,
+    "episodes": 60,
     "steps_per_episode": 400,
     "lr_actor": 3e-4,
     "lr_critic": 1e-3,
+    "optimizer": "adamw",
+    "weight_decay": 1e-2,
+    "lr_scheduler": "cosine",
+    "min_lr_ratio": 0.1,
     "gamma": 0.99,
     "log_std_init": 0.0,
-    "exploration_noise_std": 0.35,
-    "exploration_decay": 0.995
+    "exploration_noise_std": 0.25,
+    "exploration_decay": 0.985,
+    "save_model": false,
+    "save_path": "output/guided/guide_agent.pt",
+    "save_every_n_episodes": 0,
+    "do_value_conformal": true,
+    "do_space_conformal": true
+  },
+  "value_conformal": {
+    "alpha": 0.1,
+    "calibration_episodes": 5,
+    "every_n_episodes": 20,
+    "output_dir": "output/guided/conformal",
+    "figure_name": "conformal_value_interval.png"
+  },
+  "space_conformal": {
+    "alpha": 0.1,
+    "calibration_episodes": 5,
+    "every_n_episodes": 20,
+    "output_dir": "output/guided/conformal",
+    "figure_name": "conformal_space_tube.png",
+    "n_steps": 100
   }
 }

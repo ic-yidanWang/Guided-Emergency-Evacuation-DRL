@@ -19,19 +19,22 @@ def draw_exits(ax, exits, domain, label='Exits', zorder=5):
         label: Label for legend
         zorder: Z-order for rendering (higher values appear on top)
     """
-    if exits:
-        exits = np.array(exits)
-        # Check if exits are normalized (all values <= 1) or absolute
-        if exits.size > 0 and np.all(exits[:, :2] <= 1.0):
-            # Normalized coordinates, convert to absolute
-            ax.scatter(exits[:, 0] * domain['x'], exits[:, 1] * domain['y'], 
-                      c='yellow', marker='*', s=500, edgecolors='black', 
-                      linewidths=2, label=label, zorder=zorder)
-        else:
-            # Already absolute coordinates
-            ax.scatter(exits[:, 0], exits[:, 1], 
-                      c='yellow', marker='*', s=500, edgecolors='black', 
-                      linewidths=2, label=label, zorder=zorder)
+    exits = np.array(exits) if exits is not None else np.empty((0, 2))
+    if exits.size == 0:
+        return
+    if exits.ndim == 1:
+        exits = np.reshape(exits, (1, -1))
+    # Check if exits are normalized (all values <= 1) or absolute
+    if np.all(exits[:, :2] <= 1.0):
+        # Normalized coordinates, convert to absolute
+        ax.scatter(exits[:, 0] * domain['x'], exits[:, 1] * domain['y'],
+                  c='yellow', marker='*', s=500, edgecolors='black',
+                  linewidths=2, label=label, zorder=zorder)
+    else:
+        # Already absolute coordinates
+        ax.scatter(exits[:, 0], exits[:, 1],
+                  c='yellow', marker='*', s=500, edgecolors='black',
+                  linewidths=2, label=label, zorder=zorder)
 
 
 def draw_guides(ax, guides, domain, label='Guides', zorder=4):

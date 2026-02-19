@@ -85,6 +85,13 @@ Our model can efficiently handle modeling of emergency evacuation in complex env
 - Mobile guide RL training is implemented (state, reward, boundary penalty with observable position)
 - Guide state includes normalized position so the agent can learn where walls are; reward uses A* direction (obstacle-aware) and avoids noisy terms (no global evacuation progress, no “toward crowd” when the guide has no crowd state)
 
+### 双 Actor + Q(s,a) Critic + 两种 Conformal（2026）
+
+- **Critic** 改为 **Q(s, a)**：TD 用 Q(s,a) 与 `r + γ·Q(s', π(s'))`；对外 `get_value(s)=Q(s, π(s))` 用于 Conformal 与画图。
+- **双 Actor**：**ActorMove** 只输出 (vx, vy)，仅在本步未用 go_find 时更新；**ActorGoFind** 输出 go_find logit，每步都更新；两者均用 **advantage = td_target − Q(s,a)** 做 policy gradient。
+- **Value Conformal**：对“价值/回报”做区间预测，校准 (s, G)，得到每步的 [下界, 上界]，图中对比 Critic 预测与真实回报 G_t。
+- **Space Conformal**：对“轨迹空间”做管道预测，校准多段轨迹位置，得到 centroid + 半径管道，图中展示 2D 轨迹与置信带。两种均由 `train.do_value_conformal` / `train.do_space_conformal` 分别开关。详见 [Guide Agent Training (RL)](#guide-agent-training-rl) 中的架构与 Conformal 小节。
+
 ---
 
 ## Key Features
@@ -473,6 +480,28 @@ Total reward is the sum of the following (no global evacuation progress, no “m
 - **Reward for moving toward crowd centroid** when few in range: the guide has no observation of global crowd position, so that term would be inconsistent and noisy.
 
 Config for training (e.g. scales, margin, threshold) is under `config/simulation_config.json` → `train`.
+
+### 架构：双 Actor + Q(s,a) Critic
+
+- **Critic**：**Q(s, a)**（状态-动作价值），输入 (s, a)，输出标量。TD 目标为 `r + γ·Q(s', a')`，其中 `a' = π(s')`（当前策略在下一状态的确定性动作）。对外接口 `get_value(s)` 定义为 **Q(s, π(s))**，用于 Conformal 画图和展示。
+- **ActorMove**：输出 **(vx, vy)**（移动方向/速度），高斯策略。**仅在本步实际使用了 (vx, vy) 时更新**（即未触发 go_find 时）。训练指标：用 **advantage = td_target − Q(s, a)** 做 policy gradient，增大“比预期好”的动作概率。
+- **ActorGoFind**：输出 **go_find 的 logit**（sigmoid 后为“去寻路找人”的置信度），高斯策略。**每步都更新**（包括触发 go_find 的步），这样阈值能学到何时该触发。训练指标：同样用 **advantage** 更新，使“该用 go_find 时”的 logit 提高、“不该用时”降低。
+
+触发 go_find 时，环境用 A* 寻路给出移动方向，本步不更新 ActorMove，只更新 ActorGoFind 和 Critic。
+
+### Conformal 预测（两种）
+
+训练中可选用两种 Conformal 做不确定性量化，由配置 `train.do_value_conformal` / `train.do_space_conformal` 分别开关：
+
+| 类型 | 预测对象 | 校准数据 | 输出 | 用途 |
+|------|----------|----------|------|------|
+| **Value Conformal** | 价值（回报） | 多段轨迹的 (s, 真实回报 G) | 每步的 **区间 [下界, 上界]**，盖住真实回报 G_t 的 (1−α) 置信 | 看 Critic 的 Q(s, π(s)) 预测是否可靠，真实回报是否落在区间内 |
+| **Space Conformal** | 轨迹位置 | 多段轨迹的 (起点, 位置序列) | 归一化步长上的 **置信管道**（centroid 路径 + 半径 q 的圆盘） | 看真实轨迹是否落在“典型轨迹”的管道内 |
+
+- **Value Conformal**：非共形分数为 \|G − Q(s, π(s))\|，校准时取分位数得到区间半径；图中纵轴为“价值/回报”，展示 **V(s) (Critic 预测)**、**G_t (真实回报)** 与 Conformal 区间。
+- **Space Conformal**：将每条轨迹按步数插值到相同长度，得到 centroid 路径；每条轨迹的分数为“各步到 centroid 距离的最大值”，取分位数得到管道半径；图中为 2D 轨迹 + 管道（及可选 eval 轨迹）。
+
+配置见 `config/simulation_config.json` 的 `value_conformal`、`space_conformal`（alpha、calibration_episodes、every_n_episodes、output_dir、figure_name 等）。
 
 ---
 
