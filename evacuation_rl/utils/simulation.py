@@ -22,12 +22,17 @@ def setup_environment(config):
     # Apply exit parameters from config to cellspace module
     if 'exit_parameters' in config:
         cellspace.door_size = config['exit_parameters'].get('door_size', 1.0)
-        cellspace.agent_size = config['exit_parameters'].get('agent_size', 0.5)
+    # Agent size is under agents (evacuees/particles), not exit_parameters
+    if 'agents' in config:
+        cellspace.agent_size = config['agents'].get('agent_size', 0.18)
+    elif 'exit_parameters' in config:
+        cellspace.agent_size = config['exit_parameters'].get('agent_size', 0.18)  # backward compat
+    if hasattr(cellspace, 'door_size') and hasattr(cellspace, 'agent_size'):
         # BUGFIX: dis_lim must account for agent size! Agents can't get their center to exit center
         # if they're wider than the door. The equilibrium distance is roughly agent_size + door_size/2
         cellspace.dis_lim = cellspace.agent_size + cellspace.door_size
-        print(f"\nExit parameters:")
-        print(f"  - Agent size: {cellspace.agent_size}")
+        print(f"\nExit/agent parameters:")
+        print(f"  - Agent size (from agents): {cellspace.agent_size}")
         print(f"  - Door size: {cellspace.door_size}")
         print(f"  - Evacuation distance threshold (dis_lim): {cellspace.dis_lim}")
         print(f"    NOTE: dis_lim = agent_size + door_size to account for agent body width")
@@ -81,6 +86,9 @@ def setup_environment(config):
     n_guide_agent = 1 if add_guide else 0
     
     print("\nInitializing environment...")
+    # Separate speed scales: agent_speed_scale for evacuees (physics), speed_scale for guide (guide_parameters)
+    agent_speed_scale = config['physics'].get('agent_speed_scale', config['physics'].get('speed_scale', 1.0))
+    guide_speed_scale = config['guide_parameters'].get('speed_scale', 1.0)
     env = GuidedCellSpace(
         xmin=config['domain']['xmin'],
         xmax=config['domain']['xmax'],
@@ -91,21 +99,21 @@ def setup_environment(config):
         rcut=config['physics']['rcut'],
         dt=config['physics']['dt'],
         Number=config['agents']['n_particle'],
-        door_visible_radius=config['guide_parameters']['door_visible_radius'],
-        knn_k=config['guide_parameters']['knn_k'],
+        door_visible_radius=config.get('exit_parameters', {}).get('door_visible_radius', config.get('guide_parameters', {}).get('door_visible_radius', 1.0)),
+        knn_k=config.get('agents', {}).get('knn_k', config.get('guide_parameters', {}).get('knn_k', 5)),
         guide_radius=config['guide_parameters']['guide_radius'],
-        use_knn=config['guide_parameters']['use_knn'],
-        speed_scale=config['physics']['speed_scale'],
+        perception_radius=config['guide_parameters'].get('perception_radius', 2.5),
+        use_knn=config.get('agents', {}).get('use_knn', config.get('guide_parameters', {}).get('use_knn', True)),
+        speed_scale=agent_speed_scale,
+        guide_speed_scale=guide_speed_scale,
         obstacle_configs=config.get('obstacles', []),
-        knn_max_distance=config['guide_parameters'].get('knn_max_distance', 3.0),
-        knn_filter_obstacles=config['guide_parameters'].get('knn_filter_obstacles', True),
+        knn_max_distance=config.get('agents', {}).get('knn_max_distance', config.get('guide_parameters', {}).get('knn_max_distance', 3.0)),
+        knn_filter_obstacles=config.get('agents', {}).get('knn_filter_obstacles', config.get('guide_parameters', {}).get('knn_filter_obstacles', True)),
         n_guide_agent=n_guide_agent,
         guide_initial_position_mode=config['guide_parameters'].get('guide_initial_position_mode', 'random'),
         guide_initial_position=config['guide_parameters'].get('guide_initial_position'),
-        guide_influence_gain=config['guide_parameters'].get('guide_influence_gain', 2.0),
-        guide_influence_decay=config['guide_parameters'].get('guide_influence_decay', 0.5),
-        follow_guide_distance_threshold=config['guide_parameters'].get('follow_guide_distance_threshold', 3.0),
-        follow_speed_scale_in_radius=config['guide_parameters'].get('follow_speed_scale_in_radius', 0.5)
+        memory_increase_rate=config['guide_parameters'].get('memory_increase_rate', 5.0),
+        memory_decay_rate=config['guide_parameters'].get('memory_decay_rate', 0.2)
     )
     
     print(f"\nEnvironment created:")
@@ -117,9 +125,11 @@ def setup_environment(config):
         print(f"  - Guide initial position: fixed {getattr(env, 'guide_initial_position', None)}")
     elif add_guide:
         print(f"  - Guide initial position: random")
-    print(f"  - Door Visible Radius: {config['guide_parameters']['door_visible_radius']}")
+    print(f"  - Door Visible Radius: {env.door_visible_radius}")
     print(f"  - KNN Max Distance: {env.knn_max_distance}")
     print(f"  - KNN Filter Obstacles: {env.knn_filter_obstacles}")
+    print(f"  - Agent speed scale (evacuees): {env.speed_scale}")
+    print(f"  - Guide speed scale: {env.guide_speed_scale}")
     
     return env
 

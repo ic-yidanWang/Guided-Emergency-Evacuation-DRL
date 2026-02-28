@@ -76,10 +76,11 @@ def main(config_path="config/simulation_config.json"):
     gif_path = os.path.join(output_dir, config['visualization']['gif_filename'])
     print(f"\nGenerating animation: {gif_path}")
     
-    # All circle sizes from config (real simulation values)
-    agent_size = config.get('exit_parameters', {}).get('agent_size', 0.18)
+    # All circle sizes from config (real simulation values); agent_size under agents
+    agent_size = config.get('agents', {}).get('agent_size', config.get('exit_parameters', {}).get('agent_size', 0.18))
     guide_size = config.get('guide_parameters', {}).get('guide_size', 0.25)
     guide_radius = config.get('guide_parameters', {}).get('guide_radius', 1.5)
+    perception_radius = config.get('guide_parameters', {}).get('perception_radius', 2.5)
     create_animation_from_configs(
         config_dir=frames_dir,
         output_file=gif_path,
@@ -88,7 +89,8 @@ def main(config_path="config/simulation_config.json"):
         obstacle_configs=obstacle_configs,
         agent_size=agent_size,
         guide_size=guide_size,
-        guide_radius=guide_radius
+        guide_radius=guide_radius,
+        perception_radius=perception_radius
     )
     
     # Create trajectory plot

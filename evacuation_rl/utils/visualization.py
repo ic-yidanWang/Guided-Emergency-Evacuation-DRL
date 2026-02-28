@@ -152,9 +152,9 @@ def draw_agents(ax, agents, domain, label='Agents', zorder=2, alpha=0.6, agent_s
             ax.add_patch(circle)
 
 
-def draw_guide_agents(ax, guide_agents, domain, label='Guide Agents', zorder=4, guide_size=0.25, guide_radius=None):
+def draw_guide_agents(ax, guide_agents, domain, label='Guide Agents', zorder=4, guide_size=0.25, guide_radius=None, perception_radius=None):
     """
-    Draw guide agents (yellow/gold circles) and optional dashed influence circle.
+    Draw guide agents (yellow/gold circles) and optional dashed/dotted circles.
     
     Args:
         ax: Matplotlib axes object
@@ -164,6 +164,7 @@ def draw_guide_agents(ax, guide_agents, domain, label='Guide Agents', zorder=4, 
         zorder: Z-order for rendering
         guide_size: Radius of guide circles in world units (default 0.25); typically larger than agents.
         guide_radius: If set, draw a dashed circle around each guide with this radius (influence zone).
+        perception_radius: If set, draw a dotted circle around each guide with this radius (perception range).
     """
     if guide_agents:
         guide_agents = np.array(guide_agents)
@@ -171,6 +172,13 @@ def draw_guide_agents(ax, guide_agents, domain, label='Guide Agents', zorder=4, 
             xy = guide_agents[:, :2] * np.array([domain['x'], domain['y']])
         else:
             xy = guide_agents[:, :2]
+        # Draw perception radius circle (dotted) outermost
+        if perception_radius is not None and perception_radius > 0:
+            for i in range(len(xy)):
+                ring = Circle((xy[i, 0], xy[i, 1]), perception_radius,
+                              facecolor='none', edgecolor='deepskyblue', linestyle=':',
+                              linewidth=1.2, alpha=0.8, zorder=zorder - 2)
+                ax.add_patch(ring)
         # Draw influence circle (dashed) behind the guide dot
         if guide_radius is not None and guide_radius > 0:
             for i in range(len(xy)):
@@ -296,7 +304,7 @@ def plot_training_stats(episodes, losses, steps, save_path=None):
     return fig, (ax1, ax2)
 
 
-def create_animation_from_configs(config_dir, output_file='evacuation.gif', fps=10, domain=None, obstacle_configs=None, agent_size=None, guide_size=None, guide_radius=None):
+def create_animation_from_configs(config_dir, output_file='evacuation.gif', fps=10, domain=None, obstacle_configs=None, agent_size=None, guide_size=None, guide_radius=None, perception_radius=None):
     """
     Create animation from saved configuration files.
     Circle sizes should be passed from config (real simulation values), not hardcoded.
@@ -307,9 +315,10 @@ def create_animation_from_configs(config_dir, output_file='evacuation.gif', fps=
         fps: Frames per second
         domain: Optional domain dict with 'x', 'y', 'z' dimensions
         obstacle_configs: List of obstacle configs with type info (for proper visualization)
-        agent_size: Radius of agent circles in world units (from config exit_parameters.agent_size).
+        agent_size: Radius of agent circles in world units (from config agents.agent_size).
         guide_size: Radius of guide agent circles in world units (from config guide_parameters.guide_size).
         guide_radius: Radius of dashed influence circle around each guide (from config guide_parameters.guide_radius).
+        perception_radius: Radius of dotted perception circle around each guide (from config guide_parameters.perception_radius).
     """
     # Use passed config values; fallback only when caller does not pass (e.g. legacy call)
     if agent_size is None:
@@ -356,7 +365,7 @@ def create_animation_from_configs(config_dir, output_file='evacuation.gif', fps=
         draw_exits(ax, exits, domain)
         draw_guides(ax, guides, domain)
         draw_obstacles(ax, obstacle_configs=obstacle_configs, obstacles=obstacles, domain=domain)
-        draw_guide_agents(ax, guide_agents, domain, guide_size=guide_size, guide_radius=guide_radius)
+        draw_guide_agents(ax, guide_agents, domain, guide_size=guide_size, guide_radius=guide_radius, perception_radius=perception_radius)
         draw_agents(ax, agents, domain, agent_size=agent_size)
         
         # Add grid
@@ -467,7 +476,7 @@ def parse_config_file(filepath):
     return exits, guides, obstacles, agents, guide_agents, domain
 
 
-def draw_training_frame(ax, env, domain, obstacle_configs, agent_size=0.18, guide_size=0.25, guide_radius=None,
+def draw_training_frame(ax, env, domain, obstacle_configs, agent_size=0.18, guide_size=0.25, guide_radius=None, perception_radius=None,
                        episode=None, total_episodes=None, step=None, ep_reward=0.0, fig=None):
     """
     Draw a single frame for real-time training visualization from env state.
@@ -485,7 +494,7 @@ def draw_training_frame(ax, env, domain, obstacle_configs, agent_size=0.18, guid
     ax.set_aspect('equal')
     draw_exits(ax, exits, domain)
     draw_obstacles(ax, obstacle_configs=obstacle_configs, domain=domain)
-    draw_guide_agents(ax, guide_agents_xy, domain, guide_size=guide_size, guide_radius=guide_radius)
+    draw_guide_agents(ax, guide_agents_xy, domain, guide_size=guide_size, guide_radius=guide_radius, perception_radius=perception_radius)
     draw_agents(ax, agents_xy, domain, agent_size=agent_size)
     ax.grid(True, alpha=0.3)
     ax.set_xlabel('X Position', fontsize=12)

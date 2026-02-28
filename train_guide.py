@@ -6,8 +6,8 @@ Usage:
 
 Outputs (from this script):
   - Model checkpoints: when save_model=true, to train.save_path (and every N episodes if save_every_n_episodes > 0).
-  - Conformal figures: when train.do_value_conformal or train.do_space_conformal, to respective
-    output_dir; value figure: conformal_value_interval_ep{N}_*.png, space: conformal_space_tube_ep{N}_*.png.
+  - Conformal figures: when train.do_value_conformal, to value_conformal.output_dir;
+    value figure: conformal_value_interval_ep{N}_*.png (critic return intervals only).
   those come from run_guided_visualize.py (output/guided/frames/).
 """
 
@@ -19,7 +19,7 @@ import torch
 from evacuation_rl.utils.config_loader import load_config
 from evacuation_rl.utils.simulation import setup_environment
 from evacuation_rl.agents.actor_critic import ActorCritic
-from evacuation_rl.conformal import ConformalValue, ConformalSpace
+from evacuation_rl.conformal import ConformalValue
 from evacuation_rl.utils import visualization
 
 
@@ -41,28 +41,23 @@ def main():
     do_visualize = train_cfg.get('visualize', True) and not args.no_viz
     refresh_interval = int(train_cfg.get('refresh_interval', 10))
     max_guide_speed = float(train_cfg.get('max_guide_speed', 2.0))
-    exit_reward_scale = float(train_cfg.get('exit_reward_scale', 2.0))
     guide_boundary_margin = float(train_cfg.get('guide_boundary_margin', 0.8))
-    guide_boundary_penalty_scale = float(train_cfg.get('guide_boundary_penalty_scale', 0.5))
-    guide_corner_penalty_scale = float(train_cfg.get('guide_corner_penalty_scale', 0.3))
-    n_in_range_count_threshold = int(train_cfg.get('n_in_range_count_threshold', 1))
-    reward_toward_exit_scale = float(train_cfg.get('reward_toward_exit_scale', 0.1))
-    reward_toward_crowd_scale = float(train_cfg.get('reward_toward_crowd_scale', 0.1))
-    go_find_confidence_threshold = float(train_cfg.get('go_find_confidence_threshold', 0.5))
-    go_find_min_distance = float(train_cfg.get('go_find_min_distance', 3.0))
-    go_find_max_distance = float(train_cfg.get('go_find_max_distance', 5.0))
-    go_find_stick_steps = int(train_cfg.get('go_find_stick_steps', 5))
-    go_find_alone_bonus_scale = float(train_cfg.get('go_find_alone_bonus_scale', 2.0))
+    use_boundary_penalty = train_cfg.get('use_boundary_penalty', True)
+    use_corner_penalty = train_cfg.get('use_corner_penalty', True)
+    guide_boundary_penalty_scale = float(train_cfg.get('guide_boundary_penalty_scale', 0.5)) if use_boundary_penalty else 0.0
+    guide_corner_penalty_scale = float(train_cfg.get('guide_corner_penalty_scale', 0.3)) if use_corner_penalty else 0.0
+    time_penalty_scale = float(train_cfg.get('time_penalty_scale', 0.01))
+    memory_step_reward_scale = float(train_cfg.get('memory_step_reward_scale', 0.01))
+    memory_first_reward_scale = float(train_cfg.get('memory_first_reward_scale', 0.1))
+    memory_exit_reward_scale = float(train_cfg.get('memory_exit_reward_scale', 0.05))
     episodes = int(train_cfg.get('episodes', 50))
     steps_per_episode = int(train_cfg.get('steps_per_episode', 200))
     save_model = train_cfg.get('save_model', False)
     save_path = train_cfg.get('save_path', 'output/guided/guide_agent.pt')
     save_every_n_episodes = int(train_cfg.get('save_every_n_episodes', 0))
     do_value_conformal = train_cfg.get('do_value_conformal', False)
-    do_space_conformal = train_cfg.get('do_space_conformal', False)
-    do_conformal = do_value_conformal or do_space_conformal
+    do_conformal = do_value_conformal
     value_conformal_cfg = config.get('value_conformal', {})
-    space_conformal_cfg = config.get('space_conformal', {})
     lr_actor = float(train_cfg.get('lr_actor', 3e-4))
     lr_critic = float(train_cfg.get('lr_critic', 1e-3))
     gamma = float(train_cfg.get('gamma', 0.99))
@@ -73,6 +68,8 @@ def main():
     min_lr_ratio = float(train_cfg.get('min_lr_ratio', 0.1))
     exploration_noise_std = float(train_cfg.get('exploration_noise_std', 0.25))
     exploration_decay = float(train_cfg.get('exploration_decay', 0.995))
+    # Using on-policy learning: update immediately with current policy's experiences
+    # This ensures reward and state transitions are always consistent with the current policy
 
     if not config['agents'].get('add_guide_agent', False):
         print("Config has add_guide_agent=false. Enable it to train the guide.")
@@ -81,15 +78,17 @@ def main():
     env = setup_environment(config)
     state = env.get_guide_state()
     if state is None:
-        print("No guide or no exits in env. Cannot train.")
+        print("No guide in env. Cannot train.")
         return
     state_dim = state.shape[0]
-    print(f"State dim: {state_dim} (dist_to_exit, astar_dir_xy, n_in_range, x_norm, y_norm)")
-    print(f"Action: (vx, vy, confidence_logit); go_find if sigmoid(confidence) > {go_find_confidence_threshold}")
+    print(f"State dim: {state_dim} (dir_to_avg_pos_xy, avg_vel_dir_xy, astar_dir_xy, x_norm, y_norm, n_remaining_norm, n_escaped_norm, n_first_guided_norm, memory_sum_norm)")
+    print("Action: (vx, vy) continuous in [-1, 1]^2")
+    print(f"Boundary penalty: {'on' if use_boundary_penalty else 'off'} (scale={guide_boundary_penalty_scale}), Corner penalty: {'on' if use_corner_penalty else 'off'} (scale={guide_corner_penalty_scale})")
 
+    # Using Q(s,a) critic for advantage calculation (on-policy learning), with a = (vx, vy)
     agent = ActorCritic(
         state_dim=state_dim,
-        action_dim=3,
+        action_dim=2,
         hidden_sizes=(64, 64),
         lr_actor=lr_actor,
         lr_critic=lr_critic,
@@ -98,20 +97,18 @@ def main():
         optimizer_type=optimizer_type,
         weight_decay=weight_decay,
     )
+    # On-policy learning: no replay buffer needed
     scheduler_actor = None
-    scheduler_actor_go_find = None
     scheduler_critic = None
     if lr_scheduler_type == 'cosine' and episodes > 0:
         scheduler_actor = torch.optim.lr_scheduler.CosineAnnealingLR(
-            agent.opt_actor_move, T_max=episodes, eta_min=lr_actor * min_lr_ratio
-        )
-        scheduler_actor_go_find = torch.optim.lr_scheduler.CosineAnnealingLR(
-            agent.opt_actor_go_find, T_max=episodes, eta_min=lr_actor * min_lr_ratio
+            agent.opt_actor, T_max=episodes, eta_min=lr_actor * min_lr_ratio
         )
         scheduler_critic = torch.optim.lr_scheduler.CosineAnnealingLR(
             agent.opt_critic, T_max=episodes, eta_min=lr_critic * min_lr_ratio
         )
     print(f"Optimizer: {optimizer_type}, weight_decay={weight_decay}, lr_scheduler={lr_scheduler_type or 'none'}")
+    print("Training mode: On-policy learning with single Actor (vx, vy) and Q(s,a) critic")
 
     domain = {
         'x': env.L[0, 1] - env.L[0, 0],
@@ -119,42 +116,42 @@ def main():
         'z': env.L[2, 1] - env.L[2, 0],
     }
     obstacle_configs = config.get('obstacles', [])
-    agent_size = config.get('exit_parameters', {}).get('agent_size', 0.18)
+    agent_size = config.get('agents', {}).get('agent_size', config.get('exit_parameters', {}).get('agent_size', 0.18))
     guide_size = config.get('guide_parameters', {}).get('guide_size', 0.25)
     guide_radius = config.get('guide_parameters', {}).get('guide_radius')
+    perception_radius = config.get('guide_parameters', {}).get('perception_radius', 2.5)
 
-    conformal_every_n = 0
-    if do_value_conformal:
-        conformal_every_n = max(conformal_every_n, int(value_conformal_cfg.get('every_n_episodes', 0)))
-    if do_space_conformal:
-        conformal_every_n = max(conformal_every_n, int(space_conformal_cfg.get('every_n_episodes', 0)))
+    conformal_every_n = int(value_conformal_cfg.get('every_n_episodes', 0)) if do_value_conformal else 0
 
     def _run_conformal_snapshot(
         agent, config, episode_label, label_suffix,
-        exit_reward_scale, guide_boundary_margin, guide_boundary_penalty_scale, guide_corner_penalty_scale,
-        n_in_range_count_threshold, reward_toward_exit_scale,
-        go_find_confidence_threshold, go_find_min_distance, go_find_max_distance, max_guide_speed,
+        guide_boundary_margin, guide_boundary_penalty_scale, guide_corner_penalty_scale,
         steps_per_episode, gamma,
         obstacle_configs, domain,
+        memory_step_reward_scale, memory_first_reward_scale, memory_exit_reward_scale,
     ):
         import matplotlib.pyplot as plt
         v_cfg = config.get('value_conformal', {})
-        s_cfg = config.get('space_conformal', {})
         do_value = do_value_conformal
-        do_space = do_space_conformal
-        if not do_value and not do_space:
+        if not do_value:
             return
-        calibration_episodes = max(
-            int(v_cfg.get('calibration_episodes', 5)) if do_value else 0,
-            int(s_cfg.get('calibration_episodes', 5)) if do_space else 0,
-        )
+        calibration_episodes = int(v_cfg.get('calibration_episodes', 5))
         sim_out = config.get('simulation', {}).get('output_dir', 'output/guided')
 
         def _reward_fn(env):
-            return (exit_reward_scale * env.get_exit_reward()
-                    - env.get_guide_boundary_penalty(margin=guide_boundary_margin, penalty_scale=guide_boundary_penalty_scale, corner_extra_scale=guide_corner_penalty_scale)
-                    + env.get_guide_dense_reward(n_in_range_count_threshold=n_in_range_count_threshold, reward_toward_exit_scale=reward_toward_exit_scale)
-                    + env.get_guide_reward_toward_crowd(reward_toward_crowd_scale=reward_toward_crowd_scale, n_in_range_count_threshold=n_in_range_count_threshold, go_find_alone_bonus_scale=go_find_alone_bonus_scale))
+            return (
+                - env.get_guide_boundary_penalty(
+                    margin=guide_boundary_margin,
+                    penalty_scale=guide_boundary_penalty_scale,
+                    corner_extra_scale=guide_corner_penalty_scale,
+                )
+                + env.get_time_penalty_reward(time_penalty_scale=time_penalty_scale)
+                + env.get_guide_memory_reward(
+                    step_scale=memory_step_reward_scale,
+                    first_scale=memory_first_reward_scale,
+                    exit_scale=memory_exit_reward_scale,
+                )
+            )
 
         def _run_episode_trajectory(env, deterministic):
             start_pos = env.get_guide_position()
@@ -164,12 +161,7 @@ def main():
                 return traj, start_pos
             for _ in range(steps_per_episode):
                 a = agent.get_action(s, deterministic=deterministic)
-                confidence = 1.0 / (1.0 + np.exp(-float(a[2])))
-                if confidence > go_find_confidence_threshold:
-                    dx, dy = env.get_guide_go_find_direction(min_distance=go_find_min_distance, max_distance=go_find_max_distance, stick_steps=go_find_stick_steps)
-                    guide_actions = [[float(dx), float(dy)]]
-                else:
-                    guide_actions = [[float(a[0]), float(a[1])]]
+                guide_actions = [[float(a[0]), float(a[1])]]
                 done = env.step_guided(guide_actions=guide_actions, max_guide_speed=max_guide_speed)
                 r = _reward_fn(env)
                 pos = env.get_guide_position()
@@ -257,50 +249,6 @@ def main():
             plt.close(fig)
             print(f"  Value conformal: saved {out_path} (quantile={cf.quantile:.4f})")
 
-        # ----- Space conformal -----
-        if do_space:
-            alpha_s = float(s_cfg.get('alpha', 0.1))
-            n_steps = int(s_cfg.get('n_steps', 100))
-            cf_s = ConformalSpace(n_steps=n_steps).calibrate(calibration_with_start, alpha=alpha_s)
-            centroid = cf_s.centroid_path()
-            radius = cf_s.radius()
-            trajectory_xy = [eval_start_pos] + [pos for (_, _, pos) in eval_traj if pos is not None]
-            trajectory_xy = [p for p in trajectory_xy if p is not None]
-            out_dir = s_cfg.get('output_dir') or sim_out
-            base_name = (s_cfg.get('figure_name') or 'conformal_space_tube.png').replace('.png', '')
-            figure_name = f"{base_name}_ep{episode_label}_{label_suffix}.png"
-            fig, ax = plt.subplots(1, 1, figsize=(8, 8))
-            ax.set_aspect('equal')
-            ax.set_xlim(float(env_cal.L[0, 0]), float(env_cal.L[0, 1]))
-            ax.set_ylim(float(env_cal.L[1, 0]), float(env_cal.L[1, 1]))
-            exits_list = [[e['x'], e['y']] for e in config.get('exits', [])]
-            visualization.draw_exits(ax, np.array(exits_list) if exits_list else [], domain)
-            visualization.draw_obstacles(ax, obstacle_configs=obstacle_configs, domain=domain)
-            if centroid is not None:
-                cx, cy = centroid[:, 0], centroid[:, 1]
-                ax.plot(cx, cy, 'b-', lw=1.5, alpha=0.7, label='Centroid path')
-                for i in range(0, len(cx), max(1, len(cx) // 25)):
-                    circle = plt.Circle((cx[i], cy[i]), radius, fill=True, facecolor=(0, 0, 1, 0.08), edgecolor='blue', linestyle='--', linewidth=0.8)
-                    ax.add_patch(circle)
-            if len(trajectory_xy) >= 2:
-                xs, ys = [p[0] for p in trajectory_xy], [p[1] for p in trajectory_xy]
-                ax.scatter(xs, ys, c=range(len(xs)), cmap='viridis', s=20, zorder=5)
-                ax.plot(xs, ys, 'k-', lw=0.8, alpha=0.6, zorder=4, label='Eval trajectory')
-                ax.scatter([xs[0]], [ys[0]], c='green', s=120, marker='o', label='Start', zorder=6, edgecolors='black')
-                ax.scatter([xs[-1]], [ys[-1]], c='red', s=120, marker='s', label='End', zorder=6, edgecolors='black')
-            ax.set_xlabel('x')
-            ax.set_ylabel('y')
-            ax.set_title(f'Space conformal tube (r={radius:.3f}, 1-α={1-alpha_s:.1f}) — ep {episode_label}')
-            ax.legend(loc='best')
-            ax.grid(True, alpha=0.3)
-            fig.suptitle(f'Space conformal — episode {episode_label}', fontsize=12)
-            fig.tight_layout()
-            os.makedirs(out_dir, exist_ok=True)
-            out_path = os.path.join(out_dir, figure_name)
-            fig.savefig(out_path, dpi=150)
-            plt.close(fig)
-            print(f"  Space conformal: saved {out_path} (radius={radius:.4f})")
-
     fig, ax_evac, ax_reward = None, None, None
     if do_visualize:
         import matplotlib.pyplot as plt
@@ -325,35 +273,37 @@ def main():
 
         # Exploration noise decays per episode (so later episodes are more exploitative)
         noise_std = exploration_noise_std * (exploration_decay ** ep)
-        go_find_steps_this_ep = 0
         for step in range(steps_per_episode):
             a = agent.get_action(s, deterministic=False)
-            a = a + noise_std * np.random.randn(3)
+            # Add Gaussian exploration noise on (vx, vy)
+            a = a + noise_std * np.random.randn(2)
             a[0] = np.clip(a[0], -1.0, 1.0)
             a[1] = np.clip(a[1], -1.0, 1.0)
-            confidence = 1.0 / (1.0 + np.exp(-float(a[2])))
-            used_go_find = False
-            if confidence > go_find_confidence_threshold:
-                go_find_steps_this_ep += 1
-                dx, dy = env.get_guide_go_find_direction(min_distance=go_find_min_distance, max_distance=go_find_max_distance, stick_steps=go_find_stick_steps)
-                guide_actions = [[float(dx), float(dy)]]
-                used_go_find = True
-            else:
-                guide_actions = [[float(a[0]), float(a[1])]]
+
+            guide_actions = [[float(a[0]), float(a[1])]]
             done = env.step_guided(guide_actions=guide_actions, max_guide_speed=max_guide_speed)
-            r = (exit_reward_scale * env.get_exit_reward()
-                - env.get_guide_boundary_penalty(margin=guide_boundary_margin, penalty_scale=guide_boundary_penalty_scale, corner_extra_scale=guide_corner_penalty_scale)
-                + env.get_guide_dense_reward(n_in_range_count_threshold=n_in_range_count_threshold,
-                    reward_toward_exit_scale=reward_toward_exit_scale)
-                + env.get_guide_reward_toward_crowd(reward_toward_crowd_scale=reward_toward_crowd_scale,
-                    n_in_range_count_threshold=n_in_range_count_threshold,
-                    go_find_alone_bonus_scale=go_find_alone_bonus_scale))
             s_next = env.get_guide_state()
+            r = (
+                - env.get_guide_boundary_penalty(
+                    margin=guide_boundary_margin,
+                    penalty_scale=guide_boundary_penalty_scale,
+                    corner_extra_scale=guide_corner_penalty_scale,
+                )
+                + env.get_time_penalty_reward(time_penalty_scale=time_penalty_scale)
+                + env.get_guide_memory_reward(
+                    step_scale=memory_step_reward_scale,
+                    first_scale=memory_first_reward_scale,
+                    exit_scale=memory_exit_reward_scale,
+                )
+            )
             ep_reward += r
 
             s_next_valid = s_next if s_next is not None else s
-            # When we used A* go_find: (vx,vy) didn't cause the transition → only update confidence (3rd dim) so threshold learns
-            agent.update(s, a, r, s_next_valid, done=done, update_actor="confidence_only" if used_go_find else True)
+
+            # On-policy learning: update immediately with current experience
+            # Reward and state transitions are always consistent with current policy
+            agent.update(s, a, r, s_next_valid, done=done)
+            
             if s_next is not None:
                 s = s_next
             if done:
@@ -364,6 +314,7 @@ def main():
                     visualization.draw_training_frame(
                         ax_evac, env, domain, obstacle_configs,
                         agent_size=agent_size, guide_size=guide_size, guide_radius=guide_radius,
+                        perception_radius=perception_radius,
                         episode=ep + 1, total_episodes=episodes, step=step, ep_reward=ep_reward,
                         fig=fig,
                     )
@@ -377,8 +328,7 @@ def main():
         agents_xy, guide_agents_xy = env.get_all_positions_for_vis()
         n_agents, n_guides = len(agents_xy), len(guide_agents_xy)
         total_steps_ep = step + 1
-        go_find_pct = 100.0 * go_find_steps_this_ep / total_steps_ep if total_steps_ep else 0.0
-        print(f"Episode {ep+1}/{episodes}  total_reward={ep_reward:.2f}  steps={total_steps_ep}  Agents: {n_agents}  Guides: {n_guides}  |  go_find: {go_find_steps_this_ep}/{total_steps_ep} ({go_find_pct:.1f}%)")
+        print(f"Episode {ep+1}/{episodes}  total_reward={ep_reward:.2f}  steps={total_steps_ep}  Agents: {n_agents}  Guides: {n_guides}")
 
         # Save checkpoint every N episodes
         if save_model and save_path and save_every_n_episodes > 0 and (ep + 1) % save_every_n_episodes == 0:
@@ -392,20 +342,18 @@ def main():
         if do_conformal and conformal_every_n > 0 and (ep + 1) % conformal_every_n == 0:
             _run_conformal_snapshot(
                 agent, config, episode_label=ep + 1, label_suffix='snapshot',
-                exit_reward_scale=exit_reward_scale, guide_boundary_margin=guide_boundary_margin,
+                guide_boundary_margin=guide_boundary_margin,
                 guide_boundary_penalty_scale=guide_boundary_penalty_scale, guide_corner_penalty_scale=guide_corner_penalty_scale,
-                n_in_range_count_threshold=n_in_range_count_threshold, reward_toward_exit_scale=reward_toward_exit_scale,
-                go_find_confidence_threshold=go_find_confidence_threshold, go_find_min_distance=go_find_min_distance,
-                go_find_max_distance=go_find_max_distance, max_guide_speed=max_guide_speed,
                 steps_per_episode=steps_per_episode, gamma=gamma,
                 obstacle_configs=obstacle_configs, domain=domain,
+                memory_step_reward_scale=memory_step_reward_scale,
+                memory_first_reward_scale=memory_first_reward_scale,
+                memory_exit_reward_scale=memory_exit_reward_scale,
             )
 
         # LR scheduler step (per episode)
         if scheduler_actor is not None:
             scheduler_actor.step()
-        if scheduler_actor_go_find is not None:
-            scheduler_actor_go_find.step()
         if scheduler_critic is not None:
             scheduler_critic.step()
 
@@ -437,13 +385,13 @@ def main():
         if run_final:
             _run_conformal_snapshot(
                 agent, config, episode_label=episodes, label_suffix='final',
-                exit_reward_scale=exit_reward_scale, guide_boundary_margin=guide_boundary_margin,
+                guide_boundary_margin=guide_boundary_margin,
                 guide_boundary_penalty_scale=guide_boundary_penalty_scale, guide_corner_penalty_scale=guide_corner_penalty_scale,
-                n_in_range_count_threshold=n_in_range_count_threshold, reward_toward_exit_scale=reward_toward_exit_scale,
-                go_find_confidence_threshold=go_find_confidence_threshold, go_find_min_distance=go_find_min_distance,
-                go_find_max_distance=go_find_max_distance, max_guide_speed=max_guide_speed,
                 steps_per_episode=steps_per_episode, gamma=gamma,
                 obstacle_configs=obstacle_configs, domain=domain,
+                memory_step_reward_scale=memory_step_reward_scale,
+                memory_first_reward_scale=memory_first_reward_scale,
+                memory_exit_reward_scale=memory_exit_reward_scale,
             )
 
 

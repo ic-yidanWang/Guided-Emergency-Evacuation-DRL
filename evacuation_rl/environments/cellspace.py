@@ -899,25 +899,36 @@ class Cell_Space:
 class GuidedParticle(Particle):
     """
     Extended particle for guided evacuation scenarios
-    
+
     Attributes:
         knows_exit: Whether this agent knows the location of the nearest exit
         follow_threshold: Velocity threshold for following crowd behavior
         social_weight: Weight given to social following behavior
         is_guide: Whether this agent acts as a guide
-        guide_influence: Quantified level of being under guide influence [0, 1];
-            increases while within guide_radius, decays over time when leaving.
+
+        first_guided: Whether this evacuee has ever been guided by a robot
+        exit_path_memory: Last remembered A* direction to the nearest exit
+        memory_strength: How strongly the evacuee follows the remembered path [0, 1]
     """
-    
+
     def __init__(self, ID, x, y, z, vx, vy, vz, mass=80.0, type=1,
                  knows_exit=False, follow_threshold=1.0, social_weight=0.5,
-                 is_guide=False, guide_influence=0.0):
+                 is_guide=False):
         super().__init__(ID, x, y, z, vx, vy, vz, mass, type)
         self.knows_exit = knows_exit
         self.follow_threshold = follow_threshold
         self.social_weight = social_weight
         self.is_guide = is_guide
-        self.guide_influence = float(guide_influence)
+        # Guide-memory related state (only used for evacuees, ignored for guides)
+        # first_guided: has this evacuee ever been guided by a robot
+        self.first_guided = False
+        # needs_first_memory_reward: whether the "first guided" bonus is still pending
+        self.needs_first_memory_reward = True
+        # just_guided_this_step: internal flag to mark first guided event in current step
+        self.just_guided_this_step = False
+        # Store as 3D vector (z=0) for convenience when mixing with other directions
+        self.exit_path_memory = np.zeros(3, dtype=np.float64)
+        self.memory_strength = 0.0
 
 
 class GuidedCellSpace(Cell_Space):
@@ -933,19 +944,20 @@ class GuidedCellSpace(Cell_Space):
     def __init__(self, xmin=0., xmax=1., ymin=0., ymax=1.,
                  zmin=0., zmax=1., rcut=0.5, dt=0.01, Number=1,
                  door_visible_radius=1.0, knn_k=5,
-                 guide_radius=1, use_knn=True, speed_scale=1.0,
-                 obstacle_configs=None, knn_max_distance=3.0,
+                 guide_radius=1, perception_radius=2.5, use_knn=True, speed_scale=1.0,
+                 guide_speed_scale=None, obstacle_configs=None, knn_max_distance=3.0,
                  knn_filter_obstacles=True, n_guide_agent=0,
                  guide_initial_position_mode='random', guide_initial_position=None,
-                 guide_influence_gain=2.0, guide_influence_decay=0.5,
-                 follow_guide_distance_threshold=3.0, follow_speed_scale_in_radius=0.5):
+                 memory_increase_rate=5.0, memory_decay_rate=0.2):
         self.n_guide_agent = max(0, int(n_guide_agent))
         self.guide_radius = guide_radius
-        self.follow_guide_distance_threshold = max(0.0, float(follow_guide_distance_threshold))
-        # 圈内向 guide 靠近时速度的额外缩放 [0,1]，越小越不往 guide 中心挤
-        self.follow_speed_scale_in_radius = np.clip(float(follow_speed_scale_in_radius), 0.0, 1.0)
-        self.guide_influence_gain = max(0.0, float(guide_influence_gain))
-        self.guide_influence_decay = max(0.0, float(guide_influence_decay))
+        self.perception_radius = float(perception_radius)
+        # Separate speed scales: speed_scale for evacuees (particles), guide_speed_scale for guide agent(s)
+        self.speed_scale = max(0.1, float(speed_scale))
+        self.guide_speed_scale = max(0.1, float(guide_speed_scale)) if guide_speed_scale is not None else self.speed_scale
+        # Memory dynamics for evacuees once guided by a robot
+        self.memory_increase_rate = max(0.0, float(memory_increase_rate))
+        self.memory_decay_rate = max(0.0, float(memory_decay_rate))
         self.guide_initial_position_mode = str(guide_initial_position_mode).strip().lower()
         self.guide_initial_position = np.array(guide_initial_position, dtype=float) if guide_initial_position is not None else None
         # Store obstacle configs BEFORE calling parent __init__ (which calls initialize_particles)
@@ -956,7 +968,6 @@ class GuidedCellSpace(Cell_Space):
         self.door_visible_radius = door_visible_radius
         self.knn_k = max(1, int(knn_k))
         self.use_knn = use_knn
-        self.speed_scale = max(0.1, float(speed_scale))
         self.knn_max_distance = knn_max_distance
         self.knn_filter_obstacles = knn_filter_obstacles
 
@@ -1611,6 +1622,9 @@ class GuidedCellSpace(Cell_Space):
             print(f"The number of agents is {self.Number}.")
 
     def reset_guided(self, quiet=True):
+        """Reset the guided environment for a new episode."""
+        # Reset progress tracking for new episode
+        self._prev_evacuee_distances_in_range = {}
         """
         Reset environment for a new episode: clear particles and re-initialize (evacuees + guide).
         Reuses the same grid/obstacles/A* cache. Use this in training to avoid setup_environment each episode.
@@ -2241,10 +2255,54 @@ class GuidedCellSpace(Cell_Space):
                     n += 1
         return n
 
+
     def _count_evacuees_in_guide_range(self, guide_pos, max_norm=100.0):
         """Count evacuees within guide_radius of guide_pos. Returns normalized count in [0, 1] by max_norm."""
         n = self._count_evacuees_in_guide_range_raw(guide_pos)
         return min(1.0, float(n) / max(1.0, max_norm))
+
+    def _get_evacuees_perception_state(self, guide_pos):
+        """
+        Within perception_radius (circular range), compute:
+        - Direction from guide to average position of evacuees (unit vector, 2D).
+        - Average velocity direction of evacuees (unit vector, 2D).
+        Returns (dir_to_avg_pos_x, dir_to_avg_pos_y, avg_vel_dir_x, avg_vel_dir_y).
+        When no evacuees in range, returns (0, 0, 0, 0).
+        """
+        r = self.perception_radius
+        gx, gy = float(guide_pos[0]), float(guide_pos[1])
+        positions = []
+        velocities = []
+        for c in self.Cells:
+            for p in c.Particles:
+                if getattr(p, 'is_guide', False):
+                    continue
+                dx = p.position[0] - gx
+                dy = p.position[1] - gy
+                dist = np.sqrt(dx * dx + dy * dy)
+                if dist <= r:
+                    positions.append([p.position[0], p.position[1]])
+                    velocities.append([p.velocity[0], p.velocity[1]])
+        if not positions:
+            return np.float32(0.0), np.float32(0.0), np.float32(0.0), np.float32(0.0)
+        pos_arr = np.array(positions, dtype=np.float64)
+        vel_arr = np.array(velocities, dtype=np.float64)
+        avg_x = float(np.mean(pos_arr[:, 0]))
+        avg_y = float(np.mean(pos_arr[:, 1]))
+        dx = avg_x - gx
+        dy = avg_y - gy
+        norm_pos = np.sqrt(dx * dx + dy * dy) + 1e-10
+        dir_to_avg_x = float(dx / norm_pos)
+        dir_to_avg_y = float(dy / norm_pos)
+        avg_vx = float(np.mean(vel_arr[:, 0]))
+        avg_vy = float(np.mean(vel_arr[:, 1]))
+        norm_vel = np.sqrt(avg_vx * avg_vx + avg_vy * avg_vy) + 1e-10
+        avg_vel_dir_x = float(avg_vx / norm_vel)
+        avg_vel_dir_y = float(avg_vy / norm_vel)
+        return (
+            np.float32(dir_to_avg_x), np.float32(dir_to_avg_y),
+            np.float32(avg_vel_dir_x), np.float32(avg_vel_dir_y),
+        )
 
     def _evacuee_centroid_xy(self):
         """Return (cx, cy) centroid of all evacuees (non-guide), or (None, None) if no evacuees."""
@@ -2263,8 +2321,13 @@ class GuidedCellSpace(Cell_Space):
     def get_guide_state(self, normalize=True, n_particle_norm=100.0):
         """
         Get state for the first guide agent.
-        [distance_to_exit_norm, astar_dir_x, astar_dir_y, n_in_guide_range, x_norm, y_norm]. 6-dimensional.
-        Returns None if no guide or no exits.
+        12-dimensional: [dir_to_avg_pos_xy, avg_vel_dir_xy, astar_dir_xy, x_norm, y_norm,
+                        n_remaining_norm, n_escaped_this_step_norm, n_first_guided_this_step_norm, memory_sum_norm].
+        - First four: within perception_radius, direction to crowd centroid and crowd average velocity unit direction.
+        - Next two: A* direction to nearest exit (to compare with crowd movement).
+        - Next two: guide's normalized position in the room (x_norm, y_norm in [0,1]).
+        - Last four (for critic): n_remaining/n0, n_escaped_this_step/n0, n_first_guided_this_step/n0, memory_sum/n0.
+        Returns None if no guide.
         """
         guide_pos = None
         for c in self.Cells:
@@ -2274,23 +2337,42 @@ class GuidedCellSpace(Cell_Space):
                     break
             if guide_pos is not None:
                 break
-        if guide_pos is None or not self.Exit:
+        if guide_pos is None:
             return None
-        dist_to_exit, astar_dx, astar_dy = self._astar_distance_and_direction_from_xy(guide_pos[0], guide_pos[1])
-        diag = np.sqrt((self.L[0, 1] - self.L[0, 0]) ** 2 + (self.L[1, 1] - self.L[1, 0]) ** 2) + 1e-10
-        distance_norm = float(np.clip(dist_to_exit / diag, 0.0, 1.0)) if normalize else float(dist_to_exit)
-        n_particle_norm = getattr(self, 'n_particle_initial', n_particle_norm)
-        n_in_range = self._count_evacuees_in_guide_range(guide_pos, max_norm=n_particle_norm)
+        d1, d2, v1, v2 = self._get_evacuees_perception_state(guide_pos)
+        if self.Exit and len(self.Exit) > 0:
+            _, astar_dx, astar_dy = self._astar_distance_and_direction_from_xy(guide_pos[0], guide_pos[1])
+            astar_dx, astar_dy = np.float32(astar_dx), np.float32(astar_dy)
+        else:
+            astar_dx, astar_dy = np.float32(0.0), np.float32(0.0)
         xmin, xmax = float(self.L[0, 0]), float(self.L[0, 1])
         ymin, ymax = float(self.L[1, 0]), float(self.L[1, 1])
         x_span = xmax - xmin + 1e-10
         y_span = ymax - ymin + 1e-10
-        x_norm = float(np.clip((guide_pos[0] - xmin) / x_span, 0.0, 1.0))
-        y_norm = float(np.clip((guide_pos[1] - ymin) / y_span, 0.0, 1.0))
-        return np.array([
-            np.float32(distance_norm), np.float32(astar_dx), np.float32(astar_dy), np.float32(n_in_range),
-            np.float32(x_norm), np.float32(y_norm),
-        ], dtype=np.float32)
+        x_norm = np.float32(np.clip((guide_pos[0] - xmin) / x_span, 0.0, 1.0))
+        y_norm = np.float32(np.clip((guide_pos[1] - ymin) / y_span, 0.0, 1.0))
+        n0 = max(1, getattr(self, 'n_particle_initial', self.Number))
+        n_remaining = 0
+        n_first_guided_this_step = 0
+        memory_sum = 0.0
+        for c in self.Cells:
+            for p in c.Particles:
+                if getattr(p, 'is_guide', False):
+                    continue
+                n_remaining += 1
+                if getattr(p, 'just_guided_this_step', False):
+                    n_first_guided_this_step += 1
+                memory_sum += float(getattr(p, 'memory_strength', 0.0))
+        n_escaped_this_step = int(getattr(self, '_n_escaped_this_step', 0))
+        n_remaining_norm = np.float32(n_remaining / n0)
+        n_escaped_norm = np.float32(n_escaped_this_step / n0)
+        n_first_guided_norm = np.float32(n_first_guided_this_step / n0)
+        memory_sum_norm = np.float32(memory_sum / n0)
+        return np.array(
+            [d1, d2, v1, v2, astar_dx, astar_dy, x_norm, y_norm,
+             n_remaining_norm, n_escaped_norm, n_first_guided_norm, memory_sum_norm],
+            dtype=np.float32,
+        )
 
     def get_guide_position(self):
         """Return (x, y) of the first guide agent, or None if no guide."""
@@ -2366,9 +2448,16 @@ class GuidedCellSpace(Cell_Space):
 
     def _remove_particles_at_exits(self):
         """
-        Remove evacuee particles that have reached any exit; accumulate guide_influence
-        for each removed evacuee into self._exit_reward_this_step (for guide reward).
+        Remove evacuee particles that have reached any exit.
+
+        For guided training, we also accumulate a per-step sum of evacuee memory_strength
+        at exits (used by get_guide_memory_reward for a small exit-based reward).
+        Sets self._n_escaped_this_step for critic state (number who exited this step).
         """
+        # Initialize accumulator if not present
+        if not hasattr(self, "_exit_memory_sum_this_step"):
+            self._exit_memory_sum_this_step = 0.0
+        self._n_escaped_this_step = 0
         for c in self.Cells:
             i = 0
             while i < len(c.Particles):
@@ -2380,20 +2469,77 @@ class GuidedCellSpace(Cell_Space):
                 for e in self.Exit:
                     dis = np.sqrt(np.sum((p.position - e) ** 2))
                     if dis < dis_lim:
-                        self._exit_reward_this_step += getattr(p, 'guide_influence', 0.0)
+                        # Accumulate memory_strength for exit-based reward
+                        m = float(getattr(p, "memory_strength", 0.0))
+                        if m > 0.0:
+                            self._exit_memory_sum_this_step += m
                         c.Particles.pop(i)
                         in_exit = True
                         self.Number -= 1
+                        self._n_escaped_this_step += 1
                         break
                 if not in_exit:
                     i += 1
 
-    def get_exit_reward(self):
+    def get_guide_memory_reward(self, step_scale=0.0, first_scale=0.0, exit_scale=0.0):
         """
-        Return the sum of guide_influence for all evacuees that exited in the last step.
-        Call after step_guided(); reset at the start of the next step_guided.
+        Guide reward based on evacuees' exit-path memory.
+
+        Components:
+        - Continuous memory reward: while evacuees' memory_strength > 0, give small
+          reward step_scale * memory_strength each step.
+        - First-guided bonus: when an evacuee is guided for the first time, give a
+          larger reward first_scale * memory_strength once, then clear the flag so
+          it won't be repeated.
+        - Exit reward: when evacuees exit successfully, reward exit_scale * memory_strength
+          using the memory_strength they had at the moment of exit.
         """
-        return getattr(self, '_exit_reward_this_step', 0.0)
+        total = 0.0
+        # Continuous + first-guided reward over current evacuees
+        for c in self.Cells:
+            for p in c.Particles:
+                if getattr(p, "is_guide", False):
+                    continue
+                m = float(getattr(p, "memory_strength", 0.0))
+                if m > 0.0 and step_scale != 0.0:
+                    total += step_scale * m
+                # First-guided bonus (once)
+                if getattr(p, "just_guided_this_step", False) and getattr(p, "needs_first_memory_reward", True) and first_scale != 0.0:
+                    total += first_scale * m
+                    # Mark that first-guided bonus has been consumed
+                    p.needs_first_memory_reward = False
+                    p.just_guided_this_step = False
+                else:
+                    # Clear per-step flag if not used
+                    p.just_guided_this_step = False
+
+        # Exit-based reward (uses accumulator from _remove_particles_at_exits)
+        exit_sum = float(getattr(self, "_exit_memory_sum_this_step", 0.0))
+        if exit_sum > 0.0 and exit_scale != 0.0:
+            total += exit_scale * exit_sum
+        # Reset accumulator for next step
+        self._exit_memory_sum_this_step = 0.0
+        return total
+
+    def get_time_penalty_reward(self, time_penalty_scale=0.01):
+        """
+        Per-evacuee time penalty: as long as evacuees have not exited, each particle
+        contributes a constant negative reward every step.
+        Input time_penalty_scale is the magnitude (positive, e.g. 0.01).
+        Returns -time_penalty_scale * N, where N is the number of non-guide evacuees.
+        """
+        if time_penalty_scale == 0.0:
+            return 0.0
+        scale = abs(float(time_penalty_scale))
+        n = 0
+        for c in self.Cells:
+            for p in c.Particles:
+                if getattr(p, "is_guide", False):
+                    continue
+                n += 1
+        if n == 0:
+            return 0.0
+        return -scale * float(n)
 
     def get_guide_boundary_penalty(self, margin=0.8, penalty_scale=0.5, corner_extra_scale=0.0):
         """
@@ -2496,9 +2642,9 @@ class GuidedCellSpace(Cell_Space):
 
     def get_guide_dense_reward(self, n_in_range_count_threshold=1, reward_toward_exit_scale=0.1):
         """
-        Dense reward for guide. Call after step_guided().
-        Only when 圈内人数 >= n_in_range_count_threshold: reward moving toward exit (A* direction).
-        When alone (圈内无人): return 0; use get_guide_reward_toward_crowd for go_find signal.
+        Merged dense reward for guide: 人数 × (朝向出口的A*进展).
+        Call after step_guided(). No per-evacuee distance; evacuees follow guide, so guide's
+        A* direction and velocity represent progress. When 圈内人数 < threshold return 0.
         """
         guide_pos = None
         guide_velocity = None
@@ -2510,10 +2656,10 @@ class GuidedCellSpace(Cell_Space):
                     break
             if guide_pos is not None:
                 break
-        if guide_pos is None:
+        if guide_pos is None or not self.Exit:
             return 0.0
-        n_in_range_raw = self._count_evacuees_in_guide_range_raw(guide_pos)
-        if n_in_range_raw < n_in_range_count_threshold or not self.Exit:
+        n_in_range = self._count_evacuees_in_guide_range_raw(guide_pos)
+        if n_in_range < n_in_range_count_threshold:
             return 0.0
         speed_xy = np.sqrt(np.sum(guide_velocity ** 2)) + 1e-10
         if speed_xy < 1e-8:
@@ -2525,7 +2671,9 @@ class GuidedCellSpace(Cell_Space):
         if n_to < 1e-8:
             return 0.0
         dir_to_exit = dir_to_exit / n_to
-        return reward_toward_exit_scale * float(np.dot(vel_dir, dir_to_exit))
+        # Product: n_in_range * (velocity alignment with A* to exit)
+        alignment = float(np.dot(vel_dir, dir_to_exit))
+        return reward_toward_exit_scale * n_in_range * alignment
 
     def _is_guided(self, particle):
         for c in self.Cells:
@@ -2552,12 +2700,12 @@ class GuidedCellSpace(Cell_Space):
           (rush toward exit when near exit or near a guide; else KNN + noise).
         """
         done = False
+        self._n_escaped_this_step = 0
 
         if self.Number == 0:
             done = True
             return done
 
-        self._exit_reward_this_step = 0.0
         self.Zero_acc()
         # Visibility update is expensive (BFS per cell); do every 5 steps
         if getattr(self, '_debug_step_count', 0) % 5 == 0:
@@ -2591,85 +2739,121 @@ class GuidedCellSpace(Cell_Space):
                     guide_idx += 1
                     continue
 
-                # Evacuee particles: collision avoidance + exit / KNN + noise movement
+                # Evacuee particles: collision avoidance + exit / KNN + noise movement + guide memory
                 exit_vector, exit_dist = self._nearest_exit_vector(p)
                 is_guided_by_agent = False
-                _guiding_pos = None
                 for gp in _guide_positions:
                     d = np.sqrt(np.sum((p.position[:2] - gp[:2]) ** 2))
                     if d <= self.guide_radius:
                         is_guided_by_agent = True
-                        _guiding_pos = gp
                         break
 
-                # Update guide_influence: increase while under guide, decay when not
-                inf = getattr(p, 'guide_influence', 0.0)
+                # Update memory when inside guide radius
                 if is_guided_by_agent:
-                    p.guide_influence = min(1.0, inf + self.guide_influence_gain * self.dt)
+                    astar_dir = self._astar_direction_to_exit(p)
+                    if astar_dir is not None:
+                        # Store last remembered A* direction to exit as unit vector (z=0)
+                        mem_dir = np.array(astar_dir, dtype=np.float64)
+                        mem_dir[2] = 0.0
+                        norm_mem = np.linalg.norm(mem_dir[:2]) + 1e-10
+                        mem_dir[:2] = mem_dir[:2] / norm_mem
+                        p.exit_path_memory = mem_dir
+                    # Mark that this evacuee has been guided at least once
+                    p.first_guided = True
+                    # If first-guided bonus has not been consumed yet, flag this step
+                    if getattr(p, "needs_first_memory_reward", True):
+                        p.just_guided_this_step = True
+                    # Memory quickly increases to 1 when near the guide
+                    p.memory_strength = min(
+                        1.0,
+                        float(p.memory_strength) + self.memory_increase_rate * self.dt,
+                    )
                 else:
-                    p.guide_influence = max(0.0, inf - self.guide_influence_decay * self.dt)
+                    # Away from guide: memory slowly decays
+                    if p.memory_strength > 0.0:
+                        p.memory_strength = max(
+                            0.0,
+                            float(p.memory_strength) - self.memory_decay_rate * self.dt,
+                        )
 
                 # Collision avoidance when far from exits
                 collision_avoid_dir = None
                 if exit_dist > self.door_visible_radius:
                     collision_avoid_dir = self._get_collision_avoidance_direction(p)
 
+                best_action = None
+                desired_speed = 0.0
+
+                _scale = self.guide_speed_scale if getattr(p, 'is_guide', False) else self.speed_scale
                 if collision_avoid_dir is not None:
+                    # High-priority: avoid collisions, ignore memory mixing
                     move_vector = collision_avoid_dir
-                    desired_speed = desire_velocity * self.speed_scale * 1.2
-                    best_action = self._best_action_for_direction(move_vector)
-                elif is_guided_by_agent:
-                    # When far from exit: follow the guide (stay beside guide); when close: go to exit
-                    if exit_dist > self.follow_guide_distance_threshold:
-                        guide_pos = _guiding_pos
-                        if guide_pos is not None:
-                            to_guide = guide_pos - p.position
-                            to_guide[2] = 0.0
-                            dist_to_guide = np.linalg.norm(to_guide[:2]) + 1e-10
-                            move_vector = to_guide / dist_to_guide  # 3D (z=0) for _best_action_for_direction
-                            # Already inside the circle: don't squeeze in, ease off speed toward guide
-                            if dist_to_guide < self.guide_radius:
-                                # Scale speed by distance and follow_speed_scale_in_radius (降低圈内向 guide 靠近程度)
-                                follow_speed_scale = (dist_to_guide / self.guide_radius) * self.follow_speed_scale_in_radius
-                                desired_speed = desire_velocity * self.speed_scale * follow_speed_scale
-                            else:
-                                desired_speed = desire_velocity * self.speed_scale
-                        else:
-                            move_vector = exit_vector
-                            n = np.linalg.norm(move_vector) + 1e-10
-                            move_vector = move_vector / n
-                            desired_speed = desire_velocity * self.speed_scale
-                    else:
-                        astar_dir = self._astar_direction_to_exit(p)
-                        move_vector = astar_dir if astar_dir is not None else exit_vector
-                        desired_speed = desire_velocity * self.speed_scale
+                    desired_speed = desire_velocity * _scale * 1.2
                     best_action = self._best_action_for_direction(move_vector)
                 elif exit_dist <= self.door_visible_radius:
+                    # Near exits: go directly toward exit
                     move_vector = exit_vector
-                    desired_speed = desire_velocity * self.speed_scale
+                    desired_speed = desire_velocity * _scale
                     best_action = self._best_action_for_direction(move_vector)
                 else:
-                    # Far from exits: KNN + noise for evacuees (search only same+neighbor cells for speed)
+                    # Far from exits: KNN + noise, mixed with remembered A* direction from guide
                     if self.use_knn:
                         search_cells = [c] + [self.Cells[n] for n in c.Neighbors]
-                        move_vector, speed_variance = self._knn_direction_and_variance(p, self.knn_k, search_cells=search_cells)
+                        move_vector_knn, speed_variance = self._knn_direction_and_variance(
+                            p, self.knn_k, search_cells=search_cells
+                        )
                         noise = np.random.normal(0.0, np.sqrt(speed_variance * 2.0))
-                        desired_speed = max(0.1, (desire_velocity + noise) * self.speed_scale)
-                        best_action = self._best_action_for_direction(move_vector)
+                        desired_speed_knn = max(
+                            0.1, (desire_velocity + noise) * _scale
+                        )
+                        # Base KNN velocity vector (2D)
+                        v_knn_raw = desired_speed_knn * np.array(
+                            [move_vector_knn[0], move_vector_knn[1]], dtype=np.float64
+                        )
                     else:
+                        # No KNN: random direction, treat as KNN-equivalent
                         action_idx = np.random.choice(len(self.action))
-                        best_action = self.action[action_idx]
-                        desired_speed = desire_velocity * self.speed_scale
+                        rand_dir = self.action[action_idx]
+                        move_vector_knn = np.array(rand_dir, dtype=np.float64)
+                        desired_speed_knn = desire_velocity * _scale
+                        v_knn_raw = desired_speed_knn * np.array(
+                            [move_vector_knn[0], move_vector_knn[1]], dtype=np.float64
+                        )
+
+                    m = float(p.memory_strength)
+                    # Remembered A* direction component
+                    v_astar = np.zeros(2, dtype=np.float64)
+                    if m > 0.0:
+                        mem_vec = np.array(p.exit_path_memory, dtype=np.float64)
+                        mem_vec[2] = 0.0
+                        norm_mem = np.linalg.norm(mem_vec[:2])
+                        if norm_mem > 1e-8:
+                            mem_dir_2d = mem_vec[:2] / norm_mem
+                            base_speed = desire_velocity * _scale
+                            v_astar = m * base_speed * mem_dir_2d
+
+                    # Mix remembered path and KNN+noise: v_total = v_astar + (1-m) * v_knn_raw
+                    v_total_2d = v_astar + (1.0 - m) * v_knn_raw
+                    total_speed = np.linalg.norm(v_total_2d)
+                    if total_speed < 1e-8:
+                        # Fallback: use raw KNN velocity if mixing degenerates
+                        v_total_2d = v_knn_raw
+                        total_speed = np.linalg.norm(v_total_2d) + 1e-10
+
+                    move_vector = np.array(
+                        [v_total_2d[0] / total_speed, v_total_2d[1] / total_speed, 0.0],
+                        dtype=np.float64,
+                    )
+                    desired_speed = total_speed
+                    best_action = self._best_action_for_direction(move_vector)
 
                 if best_action is None:
                     continue
 
                 p.acc += 1 / relaxation_time * desired_speed * best_action
 
-        self.Integration(1)
-        self.Integration(0)
-        self.move_particles()
-        # Clamp guide velocity to max_guide_speed so collision/wall forces don't cause "flashing"
+        # Clamp guide velocity BEFORE Integration to prevent "flashing" from large wall/obstacle forces
+        # This ensures position updates use bounded velocity
         for c in self.Cells:
             for p in c.Particles:
                 if getattr(p, 'is_guide', False):
@@ -2677,6 +2861,21 @@ class GuidedCellSpace(Cell_Space):
                     if speed > max_guide_speed:
                         p.velocity[0] = p.velocity[0] * (max_guide_speed / speed)
                         p.velocity[1] = p.velocity[1] * (max_guide_speed / speed)
+        
+        self.Integration(1)
+        self.Integration(0)
+        self.move_particles()
+        
+        # Clamp guide velocity again AFTER Integration to ensure it stays within bounds
+        # (in case wall/obstacle forces added during Integration caused speed to exceed limit)
+        for c in self.Cells:
+            for p in c.Particles:
+                if getattr(p, 'is_guide', False):
+                    speed = np.sqrt(p.velocity[0]**2 + p.velocity[1]**2) + 1e-10
+                    if speed > max_guide_speed:
+                        p.velocity[0] = p.velocity[0] * (max_guide_speed / speed)
+                        p.velocity[1] = p.velocity[1] * (max_guide_speed / speed)
+        
         self._correct_obstacle_penetration()
         self._remove_particles_at_exits()
 

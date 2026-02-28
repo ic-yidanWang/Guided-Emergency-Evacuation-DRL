@@ -85,12 +85,12 @@ Our model can efficiently handle modeling of emergency evacuation in complex env
 - Mobile guide RL training is implemented (state, reward, boundary penalty with observable position)
 - Guide state includes normalized position so the agent can learn where walls are; reward uses A* direction (obstacle-aware) and avoids noisy terms (no global evacuation progress, no “toward crowd” when the guide has no crowd state)
 
-### 双 Actor + Q(s,a) Critic + 两种 Conformal（2026）
+### 单 Actor + Q(s,a) Critic + 两种 Conformal（2026）
 
-- **Critic** 改为 **Q(s, a)**：TD 用 Q(s,a) 与 `r + γ·Q(s', π(s'))`；对外 `get_value(s)=Q(s, π(s))` 用于 Conformal 与画图。
-- **双 Actor**：**ActorMove** 只输出 (vx, vy)，仅在本步未用 go_find 时更新；**ActorGoFind** 输出 go_find logit，每步都更新；两者均用 **advantage = td_target − Q(s,a)** 做 policy gradient。
+- **Critic**：**Q(s, a)**（状态-动作价值），TD 目标为 `r + γ·Q(s', π(s'))`；对外 `get_value(s)=Q(s, π(s))` 用于 Conformal 与画图。
+- **单 Actor**：**ActorMove** 输出连续动作 (vx, vy)（guide 的移动方向/速度），用 **advantage = td_target − Q(s,a)** 做 policy gradient。
 - **Value Conformal**：对“价值/回报”做区间预测，校准 (s, G)，得到每步的 [下界, 上界]，图中对比 Critic 预测与真实回报 G_t。
-- **Space Conformal**：对“轨迹空间”做管道预测，校准多段轨迹位置，得到 centroid + 半径管道，图中展示 2D 轨迹与置信带。两种均由 `train.do_value_conformal` / `train.do_space_conformal` 分别开关。详见 [Guide Agent Training (RL)](#guide-agent-training-rl) 中的架构与 Conformal 小节。
+- **Value Conformal**：仅对 Critic 的 return 做 Conformal 区间预测，由 `train.do_value_conformal` 开关。详见 [Guide Agent Training (RL)](#guide-agent-training-rl) 中的架构与 Conformal 小节。
 
 ---
 
@@ -198,12 +198,12 @@ Emergency-evacuation-Deep-reinforcement-learning/
 - ✅ Framework implemented
 - ✅ Stationary guides working
 - ✅ Mobile guide RL training (Actor-Critic) in `train_guide.py`
-- ✅ 6D state (distance, A* direction, n_in_range, x_norm, y_norm) and reward design documented in README
+- ✅ 12D state (dir_to_avg_pos_xy, avg_vel_dir_xy, astar_dir_xy, x_norm, y_norm, n_remaining_norm, n_escaped_norm, n_first_guided_norm, memory_sum_norm) and reward design documented in README
 
 **Files:**
 - `train_guide.py` — Guide RL training (Actor-Critic)
 - `evacuation_rl/agents/guided_agents/environment.py` — Guided simulation
-- `evacuation_rl/environments/cellspace.py` — `get_guide_state()`, `get_guide_dense_reward()`, `get_guide_boundary_penalty()`, `get_exit_reward()`
+- `evacuation_rl/environments/cellspace.py` — `get_guide_state()`, `get_guide_dense_reward()`, `get_guide_boundary_penalty()`
 
 ---
 
@@ -315,7 +315,7 @@ Or with standard Python:
 python train_guide.py
 ```
 
-Reward terms and the 6-dimensional guide state are described in [Guide Agent Training (RL)](#guide-agent-training-rl). Config is in `config/simulation_config.json` under `train`.
+Reward terms and the 12-dimensional guide state (perception range, A* to exit, normalized position, plus n_remaining/n_escaped/n_first_guided/memory_sum for critic) are described in [Guide Agent Training (RL)](#guide-agent-training-rl). Config is in `config/simulation_config.json` under `train`.
 
 ### 4. View Available Commands
 
@@ -450,58 +450,56 @@ Guide agents (stationary or mobile) help direct evacuees:
 
 The mobile guide is trained with **Actor-Critic** (continuous action). The following design keeps the reward and state consistent and learnable.
 
-### Guide State (6 dimensions)
+### Guide State (8 dimensions)
 
-The guide observes a **6-dimensional state** (no global crowd or absolute world coordinates beyond normalized position):
+The guide observes a **12-dimensional state**: (1) from a **circular perception range** (`perception_radius`), the **direction to the crowd centroid** and the **unit direction of the crowd’s average velocity**; (2) the **A* direction to the nearest exit** (to compare with crowd movement); (3) the **guide’s normalized position** in the room (`x_norm`, `y_norm` in [0, 1]); (4) **critic-only scalars** (all normalized by initial particle count): **remaining evacuee count**, **number escaped this step**, **number first-guided this step**, and **sum of evacuees’ memory strength** (so the critic gets global progress and guide-impact signals).
 
 | Index | Name | Range / Type | Reason |
 |-------|------|--------------|--------|
-| 0 | `distance_to_exit_norm` | [0, 1] | A* path distance to nearest exit, normalized by domain diagonal. Lets the agent know how far the exit is along walkable paths. |
-| 1 | `astar_dir_x` | unit vector component | A* direction to nearest exit (x). Obstacle-aware; avoids rewarding straight-line movement through walls. |
-| 2 | `astar_dir_y` | unit vector component | A* direction to nearest exit (y). Same as above. |
-| 3 | `n_in_guide_range` | [0, 1] | Number of evacuees within the guide’s influence radius, normalized. Indicates whether the guide is “with” people (dense reward applies when above threshold). |
-| 4 | `x_norm` | [0, 1] | Guide’s x-position in the room, normalized by domain bounds. So the agent can **learn where walls are** (e.g. 0 and 1 = walls) and avoid boundary/corner penalties. |
-| 5 | `y_norm` | [0, 1] | Same for y. Together with `x_norm`, provides absolute position for learning wall and corner avoidance. |
+| 0 | `dir_to_avg_pos_x` | unit vector component | Direction from guide to the average position of evacuees in perception range (x). |
+| 1 | `dir_to_avg_pos_y` | unit vector component | Same for y. |
+| 2 | `avg_vel_dir_x` | unit vector component | **Unit direction of crowd average velocity** (x). Lets the guide know if the crowd is evacuating or moving randomly. |
+| 3 | `avg_vel_dir_y` | unit vector component | Same for y. |
+| 4 | `astar_dir_x` | unit vector component | A* direction to nearest exit (x). Used to compare with `avg_vel_dir` to see if the crowd is moving toward the exit. |
+| 5 | `astar_dir_y` | unit vector component | Same for y. |
+| 6 | `x_norm` | [0, 1] | Guide’s x-position in the room, normalized by domain bounds. So the guide knows its rough location (e.g. near left/right walls). |
+| 7 | `y_norm` | [0, 1] | Same for y. Together with `x_norm`, gives the guide’s global position in the room. |
 
-State is computed in `evacuation_rl/environments/cellspace.py` via `get_guide_state()`.
+When no evacuees are in the perception range, the first four components are 0. When there are no exits, components 4–5 are 0. The perception radius is configured in `config/simulation_config.json` under `guide_parameters.perception_radius`.
+
+
+State is computed in `evacuation_rl/environments/cellspace.py` via `get_guide_state()` and `_get_evacuees_perception_state()`.
 
 ### Guide Reward (per step)
 
-Total reward is the sum of the following (no global evacuation progress, no “move toward crowd” term):
+Total reward is the sum of the following（已移除基于“圈内人数密度”的 dense reward 和 toward crowd 项）:
 
 | Term | Formula / Behavior | Reason |
 |------|---------------------|--------|
-| **Exit reward** | `exit_reward_scale * get_exit_reward()` | Credits the guide for evacuees that just reached an exit, weighted by each evacuee’s `guide_influence`. Direct incentive for leading people out. |
-| **Boundary penalty** | `-get_guide_boundary_penalty(margin, penalty_scale, corner_extra_scale)` | Penalty when the guide is close to walls (distance to nearest wall &lt; margin); extra penalty near corners. **Learnable** because state includes `x_norm`, `y_norm`, so the agent can associate position with penalty. |
-| **Dense reward (toward exit)** | `+get_guide_dense_reward(...)` | When `n_in_guide_range >= n_in_range_threshold`, reward is proportional to how much the guide’s velocity aligns with the **A* direction** to the exit (not straight line). Gives a dense signal to move toward the exit along feasible paths when guiding people. When fewer evacuees are in range, dense reward is 0 (guide has no state about where the crowd is, so no “move toward crowd” reward). |
-
-**Intentionally not used:**
-- **Evacuation progress** (e.g. mean distance of all evacuees to exits): too noisy, since evacuees can reach exits on their own with some probability.
-- **Reward for moving toward crowd centroid** when few in range: the guide has no observation of global crowd position, so that term would be inconsistent and noisy.
+| **Boundary penalty** | `-get_guide_boundary_penalty(margin, penalty_scale, corner_extra_scale)` | Penalty when the guide is close to walls (distance to nearest wall &lt; margin); extra penalty near corners. **Learnable** from boundary distance and penalties. |
+| **Time penalty** | `+get_time_penalty_reward(time_penalty_scale=...)` | 对每个尚未出门的 evacuee 施加持续的时间惩罚：每步为 `-time_penalty_scale × N_remaining`（config 中填正数如 0.01），鼓励 guide 尽快让所有人离开。 |
+| **Memory reward (continuous)** | `+get_guide_memory_reward(step_scale=...)` | 当 evacuee 的 `memory_strength > 0` 时，每步按照 memory_strength 给 guide 少量正奖励，鼓励在给出明确路线后，人群沿着记忆路线前进。 |
+| **Memory-first reward (bonus)** | `+get_guide_memory_reward(first_scale=...)` | evacuee 第一次在 guide 附近获得明确 A* 路线时，按 memory_strength 给一次性较大正奖励，鼓励 guide 主动“教路”。 |
+| **Memory-exit reward** | `+get_guide_memory_reward(exit_scale=...)` | evacuee 成功从出口离开时，按照其离开前的 memory_strength 给 guide 一点正奖励，体现“成功带出一批记得路的人”。 |
 
 Config for training (e.g. scales, margin, threshold) is under `config/simulation_config.json` → `train`.
 
-### 架构：双 Actor + Q(s,a) Critic
+### 架构：单 Actor + Q(s,a) Critic
 
 - **Critic**：**Q(s, a)**（状态-动作价值），输入 (s, a)，输出标量。TD 目标为 `r + γ·Q(s', a')`，其中 `a' = π(s')`（当前策略在下一状态的确定性动作）。对外接口 `get_value(s)` 定义为 **Q(s, π(s))**，用于 Conformal 画图和展示。
-- **ActorMove**：输出 **(vx, vy)**（移动方向/速度），高斯策略。**仅在本步实际使用了 (vx, vy) 时更新**（即未触发 go_find 时）。训练指标：用 **advantage = td_target − Q(s, a)** 做 policy gradient，增大“比预期好”的动作概率。
-- **ActorGoFind**：输出 **go_find 的 logit**（sigmoid 后为“去寻路找人”的置信度），高斯策略。**每步都更新**（包括触发 go_find 的步），这样阈值能学到何时该触发。训练指标：同样用 **advantage** 更新，使“该用 go_find 时”的 logit 提高、“不该用时”降低。
+- **Actor（单一）**：输出 **(vx, vy)**（移动方向/速度），高斯策略。每步都用 **advantage = td_target − Q(s, a)** 做 policy gradient，增大“比预期好”的动作概率；不再区分“是否触发 go_find”。 
 
-触发 go_find 时，环境用 A* 寻路给出移动方向，本步不更新 ActorMove，只更新 ActorGoFind 和 Critic。
+### Conformal 预测（仅 Value / Critic return）
 
-### Conformal 预测（两种）
-
-训练中可选用两种 Conformal 做不确定性量化，由配置 `train.do_value_conformal` / `train.do_space_conformal` 分别开关：
+训练中可选用 **Value Conformal** 对 Critic 回报做不确定性量化，由配置 `train.do_value_conformal` 开关：
 
 | 类型 | 预测对象 | 校准数据 | 输出 | 用途 |
 |------|----------|----------|------|------|
 | **Value Conformal** | 价值（回报） | 多段轨迹的 (s, 真实回报 G) | 每步的 **区间 [下界, 上界]**，盖住真实回报 G_t 的 (1−α) 置信 | 看 Critic 的 Q(s, π(s)) 预测是否可靠，真实回报是否落在区间内 |
-| **Space Conformal** | 轨迹位置 | 多段轨迹的 (起点, 位置序列) | 归一化步长上的 **置信管道**（centroid 路径 + 半径 q 的圆盘） | 看真实轨迹是否落在“典型轨迹”的管道内 |
 
-- **Value Conformal**：非共形分数为 \|G − Q(s, π(s))\|，校准时取分位数得到区间半径；图中纵轴为“价值/回报”，展示 **V(s) (Critic 预测)**、**G_t (真实回报)** 与 Conformal 区间。
-- **Space Conformal**：将每条轨迹按步数插值到相同长度，得到 centroid 路径；每条轨迹的分数为“各步到 centroid 距离的最大值”，取分位数得到管道半径；图中为 2D 轨迹 + 管道（及可选 eval 轨迹）。
+- **Value Conformal**：非共形分数为 \|G − Q(s, π(s))\|，校准时取分位数得到区间半径；图中纵轴为“价值/回报”，展示 **Q(s, π(s)) (Critic 预测)**、**G_t (真实回报)** 与 Conformal 区间。
 
-配置见 `config/simulation_config.json` 的 `value_conformal`、`space_conformal`（alpha、calibration_episodes、every_n_episodes、output_dir、figure_name 等）。
+配置见 `config/simulation_config.json` 的 `value_conformal`（alpha、calibration_episodes、every_n_episodes、output_dir、figure_name 等）。
 
 ---
 
@@ -535,7 +533,7 @@ In `evacuation_rl/environments/cellspace.py`:
 #### 1. RL-Based Guide Agent Training (Implemented)
 **Implemented:**
 - Mobile guide trained with **Actor-Critic** (continuous action) in `train_guide.py`
-- **State (6D):** A* distance to exit, A* direction (2D), evacuees in range (normalized), normalized position (x_norm, y_norm) so the agent can learn where walls are
+- **State (8D):** Direction to crowd centroid (2D) and **unit direction of crowd average velocity** (2D) within `perception_radius`; **A* direction to nearest exit** (2D); **guide’s normalized position** (x_norm, y_norm) so the guide knows its rough location in the room
 - **Reward:** exit reward (credit for evacuees reaching exit), boundary/corner penalty (learnable thanks to position in state), dense reward for moving toward exit in A* direction when many evacuees are in range (no global evacuation progress or “toward crowd” to reduce noise)
 - See [Guide Agent Training (RL)](#guide-agent-training-rl) for full reward and state documentation
 
