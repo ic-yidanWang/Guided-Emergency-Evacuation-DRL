@@ -929,6 +929,8 @@ class GuidedParticle(Particle):
         # Store as 3D vector (z=0) for convenience when mixing with other directions
         self.exit_path_memory = np.zeros(3, dtype=np.float64)
         self.memory_strength = 0.0
+        # Step index when exit_path_memory was last updated from A* (for periodic refresh)
+        self.last_astar_update_step = -999
 
 
 class GuidedCellSpace(Cell_Space):
@@ -948,7 +950,8 @@ class GuidedCellSpace(Cell_Space):
                  guide_speed_scale=None, obstacle_configs=None, knn_max_distance=3.0,
                  knn_filter_obstacles=True, n_guide_agent=0,
                  guide_initial_position_mode='random', guide_initial_position=None,
-                 memory_increase_rate=5.0, memory_decay_rate=0.2):
+                 memory_increase_rate=5.0, memory_decay_rate=0.2,
+                 memory_astar_thres_around=0.3, memory_astar_thres_out=0.2, memory_astar_update_interval_n=5):
         self.n_guide_agent = max(0, int(n_guide_agent))
         self.guide_radius = guide_radius
         self.perception_radius = float(perception_radius)
@@ -958,6 +961,9 @@ class GuidedCellSpace(Cell_Space):
         # Memory dynamics for evacuees once guided by a robot
         self.memory_increase_rate = max(0.0, float(memory_increase_rate))
         self.memory_decay_rate = max(0.0, float(memory_decay_rate))
+        self.memory_astar_thres_around = float(memory_astar_thres_around)
+        self.memory_astar_thres_out = float(memory_astar_thres_out)
+        self.memory_astar_update_interval_n = max(1, int(memory_astar_update_interval_n))
         self.guide_initial_position_mode = str(guide_initial_position_mode).strip().lower()
         self.guide_initial_position = np.array(guide_initial_position, dtype=float) if guide_initial_position is not None else None
         # Store obstacle configs BEFORE calling parent __init__ (which calls initialize_particles)
@@ -2749,15 +2755,21 @@ class GuidedCellSpace(Cell_Space):
                         break
 
                 # Update memory when inside guide radius
+                current_step = getattr(self, '_debug_step_count', 0)
+                n_interval = self.memory_astar_update_interval_n
                 if is_guided_by_agent:
-                    astar_dir = self._astar_direction_to_exit(p)
-                    if astar_dir is not None:
-                        # Store last remembered A* direction to exit as unit vector (z=0)
-                        mem_dir = np.array(astar_dir, dtype=np.float64)
-                        mem_dir[2] = 0.0
-                        norm_mem = np.linalg.norm(mem_dir[:2]) + 1e-10
-                        mem_dir[:2] = mem_dir[:2] / norm_mem
-                        p.exit_path_memory = mem_dir
+                    # When near guide: refresh A* direction every n steps if memory_strength >= thres_around
+                    m = float(p.memory_strength)
+                    last_up = getattr(p, 'last_astar_update_step', -999)
+                    if m >= self.memory_astar_thres_around and (current_step - last_up) >= n_interval:
+                        astar_dir = self._astar_direction_to_exit(p)
+                        if astar_dir is not None:
+                            mem_dir = np.array(astar_dir, dtype=np.float64)
+                            mem_dir[2] = 0.0
+                            norm_mem = np.linalg.norm(mem_dir[:2]) + 1e-10
+                            mem_dir[:2] = mem_dir[:2] / norm_mem
+                            p.exit_path_memory = mem_dir
+                            p.last_astar_update_step = current_step
                     # Mark that this evacuee has been guided at least once
                     p.first_guided = True
                     # If first-guided bonus has not been consumed yet, flag this step
@@ -2775,6 +2787,18 @@ class GuidedCellSpace(Cell_Space):
                             0.0,
                             float(p.memory_strength) - self.memory_decay_rate * self.dt,
                         )
+                    # When not near guide: refresh A* direction every n steps if memory_strength >= thres_out
+                    m = float(p.memory_strength)
+                    last_up = getattr(p, 'last_astar_update_step', -999)
+                    if m >= self.memory_astar_thres_out and (current_step - last_up) >= n_interval:
+                        astar_dir = self._astar_direction_to_exit(p)
+                        if astar_dir is not None:
+                            mem_dir = np.array(astar_dir, dtype=np.float64)
+                            mem_dir[2] = 0.0
+                            norm_mem = np.linalg.norm(mem_dir[:2]) + 1e-10
+                            mem_dir[:2] = mem_dir[:2] / norm_mem
+                            p.exit_path_memory = mem_dir
+                            p.last_astar_update_step = current_step
 
                 # Collision avoidance when far from exits
                 collision_avoid_dir = None

@@ -30,7 +30,10 @@
     "guide_size": 0.25,
     "speed_scale": 1.0,
     "memory_increase_rate": 5.0,
-    "memory_decay_rate": 0.2
+    "memory_decay_rate": 0.2,
+    "memory_astar_thres_around": 0.2,
+    "memory_astar_thres_out": 0.5,
+    "memory_astar_update_interval_n": 5
   },
   "exit_parameters": {
     "door_size": 0.46,
@@ -58,17 +61,17 @@
     "visualize": true,
     "refresh_interval": 5,
     "max_guide_speed": 1.6,
-    "guide_boundary_margin": 0.8,
-    "use_boundary_penalty": false,
-    "use_corner_penalty": false,
-    "guide_boundary_penalty_scale": 1.2,
+    "guide_boundary_margin": 0.5,
+    "use_boundary_penalty": true,
+    "use_corner_penalty": true,
+    "guide_boundary_penalty_scale": 0.02,
     "guide_corner_penalty_scale": 0.9,
     "time_penalty_scale": 0.001,
     "memory_step_reward_scale": 0.02,
     "memory_first_reward_scale": 0.1,
     "memory_exit_reward_scale": 0.08,
-    "episodes": 60,
-    "steps_per_episode": 400,
+    "episodes": 600,
+    "steps_per_episode": 800,
     "lr_actor": 0.0003,
     "lr_critic": 0.001,
     "optimizer": "adamw",
@@ -78,17 +81,19 @@
     "gamma": 0.99,
     "log_std_init": 0.0,
     "exploration_noise_std": 0.25,
-    "exploration_decay": 0.985,
+    "exploration_decay": 0.99,
     "save_model": true,
     "save_path": "output/guided/guide_agent.pt",
-    "save_every_n_episodes": 0,
+    "save_every_n_episodes": 50,
     "do_value_conformal": true
   },
   "value_conformal": {
     "alpha": 0.1,
     "calibration_episodes": 5,
-    "every_n_episodes": 20,
+    "every_n_episodes": 100,
     "output_dir": "output/guided/conformal",
-    "figure_name": "conformal_value_interval.png"
+    "figure_name": "conformal_value_interval.png",
+    "fix_seed": true,
+    "seed": 42
   }
 }

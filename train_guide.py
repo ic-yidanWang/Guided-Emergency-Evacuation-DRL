@@ -13,6 +13,7 @@ Outputs (from this script):
 
 import argparse
 import os
+import time
 import numpy as np
 import torch
 
@@ -22,6 +23,7 @@ from evacuation_rl.agents.actor_critic import ActorCritic
 from evacuation_rl.conformal import ConformalValue
 from evacuation_rl.utils import visualization
 
+import matplotlib.pyplot as plt
 
 def main():
     parser = argparse.ArgumentParser(description='Train guide agent with Actor-Critic')
@@ -140,6 +142,21 @@ def main():
             return
         calibration_episodes = int(v_cfg.get('calibration_episodes', 5))
         sim_out = config.get('simulation', {}).get('output_dir', 'output/guided')
+        fix_seed = v_cfg.get('fix_seed', False)
+        conformal_seed = int(v_cfg.get('seed', 42))
+        saved_np_state = None
+        saved_torch_state = None
+        if fix_seed:
+            saved_np_state = np.random.get_state()
+            saved_torch_state = torch.get_rng_state()
+            np.random.seed(conformal_seed)
+            torch.manual_seed(conformal_seed)
+            print(f"  Conformal: fix_seed=True, seed={conformal_seed} (reproducible calibration & eval)")
+
+        def _restore_rng():
+            if fix_seed and saved_np_state is not None:
+                np.random.set_state(saved_np_state)
+                torch.set_rng_state(saved_torch_state)
 
         def _reward_fn(env):
             return (
@@ -175,84 +192,87 @@ def main():
                     break
             return traj, start_pos
 
-        print(f"Conformal: snapshot for ep {episode_label} — calibration {calibration_episodes} ep + 1 eval")
-        env_cal = setup_environment(config)
-        calibration_with_start = []
-        for ep in range(calibration_episodes):
-            if ep > 0:
-                env_cal.reset_guided(quiet=True)
-            traj, start_pos = _run_episode_trajectory(env_cal, deterministic=False)
-            if traj:
-                calibration_with_start.append((start_pos, traj))
-            print(f"  Conformal: calibration ep {ep + 1}/{calibration_episodes} done ({len(traj) if traj else 0} steps)")
-        if not calibration_with_start:
-            print(f"Conformal ep{episode_label}: no calibration data, skip.")
-            return
-        print(f"  Conformal: running eval episode...")
-        env_cal.reset_guided(quiet=True)
-        eval_traj, eval_start_pos = _run_episode_trajectory(env_cal, deterministic=True)
-        print(f"  Conformal: eval done ({len(eval_traj)} steps), plotting...")
-        if not eval_traj:
-            print(f"Conformal ep{episode_label}: empty eval trajectory, skip.")
-            return
+        try:
+            print(f"Conformal: snapshot for ep {episode_label} — calibration {calibration_episodes} ep + 1 eval")
+            env_cal = setup_environment(config)
+            calibration_with_start = []
+            for ep in range(calibration_episodes):
+                if ep > 0:
+                    env_cal.reset_guided(quiet=True)
+                traj, start_pos = _run_episode_trajectory(env_cal, deterministic=False)
+                if traj:
+                    calibration_with_start.append((start_pos, traj))
+                print(f"  Conformal: calibration ep {ep + 1}/{calibration_episodes} done ({len(traj) if traj else 0} steps)")
+            if not calibration_with_start:
+                print(f"Conformal ep{episode_label}: no calibration data, skip.")
+                return
+            print(f"  Conformal: running eval episode...")
+            env_cal.reset_guided(quiet=True)
+            eval_traj, eval_start_pos = _run_episode_trajectory(env_cal, deterministic=True)
+            print(f"  Conformal: eval done ({len(eval_traj)} steps), plotting...")
+            if not eval_traj:
+                print(f"Conformal ep{episode_label}: empty eval trajectory, skip.")
+                return
 
-        # ----- Value conformal -----
-        if do_value:
-            calibration_trajectories_value = [[(s, r) for s, r, _ in t] for _, t in calibration_with_start]
-            alpha_v = float(v_cfg.get('alpha', 0.1))
-            cf = ConformalValue(agent, gamma=gamma).calibrate(calibration_trajectories_value, alpha=alpha_v)
-            trajectory_xy = [eval_start_pos] + [pos for (_, _, pos) in eval_traj if pos is not None]
-            trajectory_xy = [p for p in trajectory_xy if p is not None]
-            steps, values, lowers, uppers, empirical_returns = [], [], [], [], []
-            T = len(eval_traj)
-            for t in range(T):
-                s, r, _ = eval_traj[t]
-                v = cf.predict(s)
-                lo, hi = cf.interval(s)
-                G_t = sum((gamma ** (k - t)) * eval_traj[k][1] for k in range(t, T))
-                steps.append(t)
-                values.append(v)
-                lowers.append(lo)
-                uppers.append(hi)
-                empirical_returns.append(G_t)
-            out_dir = v_cfg.get('output_dir') or sim_out
-            base_name = (v_cfg.get('figure_name') or 'conformal_value_interval.png').replace('.png', '')
-            figure_name = f"{base_name}_ep{episode_label}_{label_suffix}.png"
-            fig_to_save = Figure(figsize=(14, 5))
-            FigureCanvasAgg(fig_to_save)
-            ax_traj = fig_to_save.add_subplot(121)
-            ax_val = fig_to_save.add_subplot(122)
-            ax_traj.set_aspect('equal')
-            ax_traj.set_xlim(float(env_cal.L[0, 0]), float(env_cal.L[0, 1]))
-            ax_traj.set_ylim(float(env_cal.L[1, 0]), float(env_cal.L[1, 1]))
-            exits_list = [[e['x'], e['y']] for e in config.get('exits', [])]
-            visualization.draw_exits(ax_traj, np.array(exits_list) if exits_list else [], domain)
-            visualization.draw_obstacles(ax_traj, obstacle_configs=obstacle_configs, domain=domain)
-            if len(trajectory_xy) >= 2:
-                xs, ys = [p[0] for p in trajectory_xy], [p[1] for p in trajectory_xy]
-                ax_traj.scatter(xs, ys, c=range(len(xs)), cmap='viridis', s=20, zorder=5)
-                ax_traj.plot(xs, ys, 'k-', lw=0.8, alpha=0.6, zorder=4)
-                ax_traj.scatter([xs[0]], [ys[0]], c='green', s=120, marker='o', label='Start', zorder=6, edgecolors='black')
-                ax_traj.scatter([xs[-1]], [ys[-1]], c='red', s=120, marker='s', label='End', zorder=6, edgecolors='black')
-            ax_traj.set_xlabel('x')
-            ax_traj.set_ylabel('y')
-            ax_traj.set_title(f'Guide trajectory (ep {episode_label})')
-            ax_traj.legend(loc='best')
-            ax_traj.grid(True, alpha=0.3)
-            ax_val.fill_between(steps, lowers, uppers, alpha=0.3, color='steelblue', label=f'Conformal Interval (1-α={1-alpha_v:.1f})')
-            ax_val.plot(steps, values, color='navy', lw=2, label='V(s) (Critic Prediction)')
-            ax_val.plot(steps, empirical_returns, color='darkorange', lw=1.5, ls='--', label='G_t (True Return)')
-            ax_val.set_xlabel('Step')
-            ax_val.set_ylabel('Value / Return')
-            ax_val.set_title('Conformal value interval by step')
-            ax_val.legend(loc='best')
-            ax_val.grid(True, alpha=0.3)
-            fig_to_save.suptitle(f'Value conformal — episode {episode_label}', fontsize=12)
-            fig_to_save.tight_layout()
-            os.makedirs(out_dir, exist_ok=True)
-            out_path = os.path.join(out_dir, figure_name)
-            fig_to_save.savefig(out_path, dpi=150)
-            print(f"  Value conformal: saved {out_path} (quantile={cf.quantile:.4f})")
+            # ----- Value conformal -----
+            if do_value:
+                calibration_trajectories_value = [[(s, r) for s, r, _ in t] for _, t in calibration_with_start]
+                alpha_v = float(v_cfg.get('alpha', 0.1))
+                cf = ConformalValue(agent, gamma=gamma).calibrate(calibration_trajectories_value, alpha=alpha_v)
+                trajectory_xy = [eval_start_pos] + [pos for (_, _, pos) in eval_traj if pos is not None]
+                trajectory_xy = [p for p in trajectory_xy if p is not None]
+                steps, values, lowers, uppers, empirical_returns = [], [], [], [], []
+                T = len(eval_traj)
+                for t in range(T):
+                    s, r, _ = eval_traj[t]
+                    v = cf.predict(s)
+                    lo, hi = cf.interval(s)
+                    G_t = sum((gamma ** (k - t)) * eval_traj[k][1] for k in range(t, T))
+                    steps.append(t)
+                    values.append(v)
+                    lowers.append(lo)
+                    uppers.append(hi)
+                    empirical_returns.append(G_t)
+                out_dir = v_cfg.get('output_dir') or sim_out
+                base_name = (v_cfg.get('figure_name') or 'conformal_value_interval.png').replace('.png', '')
+                figure_name = f"{base_name}_ep{episode_label}_{label_suffix}.png"
+                fig_to_save = Figure(figsize=(14, 5))
+                FigureCanvasAgg(fig_to_save)
+                ax_traj = fig_to_save.add_subplot(121)
+                ax_val = fig_to_save.add_subplot(122)
+                ax_traj.set_aspect('equal')
+                ax_traj.set_xlim(float(env_cal.L[0, 0]), float(env_cal.L[0, 1]))
+                ax_traj.set_ylim(float(env_cal.L[1, 0]), float(env_cal.L[1, 1]))
+                exits_list = [[e['x'], e['y']] for e in config.get('exits', [])]
+                visualization.draw_exits(ax_traj, np.array(exits_list) if exits_list else [], domain)
+                visualization.draw_obstacles(ax_traj, obstacle_configs=obstacle_configs, domain=domain)
+                if len(trajectory_xy) >= 2:
+                    xs, ys = [p[0] for p in trajectory_xy], [p[1] for p in trajectory_xy]
+                    ax_traj.scatter(xs, ys, c=range(len(xs)), cmap='viridis', s=20, zorder=5)
+                    ax_traj.plot(xs, ys, 'k-', lw=0.8, alpha=0.6, zorder=4)
+                    ax_traj.scatter([xs[0]], [ys[0]], c='green', s=120, marker='o', label='Start', zorder=6, edgecolors='black')
+                    ax_traj.scatter([xs[-1]], [ys[-1]], c='red', s=120, marker='s', label='End', zorder=6, edgecolors='black')
+                ax_traj.set_xlabel('x')
+                ax_traj.set_ylabel('y')
+                ax_traj.set_title(f'Guide trajectory (ep {episode_label})')
+                ax_traj.legend(loc='best')
+                ax_traj.grid(True, alpha=0.3)
+                ax_val.fill_between(steps, lowers, uppers, alpha=0.3, color='steelblue', label=f'Conformal Interval (1-α={1-alpha_v:.1f})')
+                ax_val.plot(steps, values, color='navy', lw=2, label='V(s) (Critic Prediction)')
+                ax_val.plot(steps, empirical_returns, color='darkorange', lw=1.5, ls='--', label='G_t (True Return)')
+                ax_val.set_xlabel('Step')
+                ax_val.set_ylabel('Value / Return')
+                ax_val.set_title('Conformal value interval by step')
+                ax_val.legend(loc='best')
+                ax_val.grid(True, alpha=0.3)
+                fig_to_save.suptitle(f'Value conformal — episode {episode_label}', fontsize=12)
+                fig_to_save.tight_layout()
+                os.makedirs(out_dir, exist_ok=True)
+                out_path = os.path.join(out_dir, figure_name)
+                fig_to_save.savefig(out_path, dpi=150)
+                print(f"  Value conformal: saved {out_path} (quantile={cf.quantile:.4f})")
+        finally:
+            _restore_rng()
 
     fig, ax_evac, ax_reward = None, None, None
     if do_visualize:
@@ -265,6 +285,7 @@ def main():
         fig.canvas.draw()
 
     total_reward_per_episode = []
+    train_start_time = time.perf_counter()
 
     for ep in range(episodes):
         if ep == 0:
@@ -337,6 +358,7 @@ def main():
 
         # Save checkpoint every N episodes
         if save_model and save_path and save_every_n_episodes > 0 and (ep + 1) % save_every_n_episodes == 0:
+            print("Saving the model...")
             os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
             base, ext = os.path.splitext(save_path)
             path_n = f"{base}_ep{ep + 1}{ext}"
@@ -345,6 +367,7 @@ def main():
 
         # Conformal snapshot every N episodes
         if do_conformal and conformal_every_n > 0 and (ep + 1) % conformal_every_n == 0:
+            print("Running conformal snapshot...")
             if do_visualize and ax_evac is not None and fig is not None:
                 ax_evac.clear()
                 ax_evac.set_xlim(0, domain['x'])
@@ -372,7 +395,23 @@ def main():
             scheduler_critic.step()
 
     if do_visualize and fig is not None:
-        import matplotlib.pyplot as plt
+        
+        total_elapsed = time.perf_counter() - train_start_time
+        if ax_evac is not None:
+            ax_evac.clear()
+            ax_evac.set_xlim(0, domain['x'])
+            ax_evac.set_ylim(0, domain['y'])
+            ax_evac.set_aspect('equal')
+            if total_elapsed >= 3600:
+                time_str = f'{total_elapsed / 3600:.2f} h'
+            elif total_elapsed >= 60:
+                time_str = f'{total_elapsed / 60:.2f} min'
+            else:
+                time_str = f'{total_elapsed:.2f} s'
+            ax_evac.text(0.5, 0.5, f'Training finished\nTotal time: {time_str}',
+                         transform=ax_evac.transAxes, fontsize=14, ha='center', va='center')
+            fig.canvas.draw_idle()
+            fig.canvas.flush_events()
         if ax_reward is not None and total_reward_per_episode:
             visualization.draw_reward_curve(ax_reward, total_reward_per_episode, max_episodes=episodes, fig=fig)
         plt.ioff()
@@ -382,13 +421,16 @@ def main():
         else:
             plt.close(fig)
 
-    print("\nTraining finished.")
+    print(f"\nTraining finished. Time taken: {time_str:.2f}.")
+
+    
     if total_reward_per_episode:
         n = min(10, len(total_reward_per_episode))
         print(f"Mean episode reward (last {n}): {sum(total_reward_per_episode[-n:]) / n:.2f}")
     # Save final checkpoint (if not already saved this episode by save_every_n)
     if save_model and save_path:
         if save_every_n_episodes <= 0 or episodes % save_every_n_episodes != 0:
+            print("Saving the lastmodel...")
             os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
             torch.save({"agent": agent.state_dict()}, save_path)
             print(f"Saved agent to {save_path}")
@@ -397,6 +439,7 @@ def main():
     if do_conformal:
         run_final = (conformal_every_n <= 0) or (episodes % conformal_every_n != 0)
         if run_final:
+            print("Running final conformal snapshot...")
             _run_conformal_snapshot(
                 agent, config, episode_label=episodes, label_suffix='final',
                 guide_boundary_margin=guide_boundary_margin,

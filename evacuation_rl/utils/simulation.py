@@ -113,7 +113,10 @@ def setup_environment(config):
         guide_initial_position_mode=config['guide_parameters'].get('guide_initial_position_mode', 'random'),
         guide_initial_position=config['guide_parameters'].get('guide_initial_position'),
         memory_increase_rate=config['guide_parameters'].get('memory_increase_rate', 5.0),
-        memory_decay_rate=config['guide_parameters'].get('memory_decay_rate', 0.2)
+        memory_decay_rate=config['guide_parameters'].get('memory_decay_rate', 0.2),
+        memory_astar_thres_around=config['guide_parameters'].get('memory_astar_thres_around', 0.3),
+        memory_astar_thres_out=config['guide_parameters'].get('memory_astar_thres_out', 0.2),
+        memory_astar_update_interval_n=config['guide_parameters'].get('memory_astar_update_interval_n', 5)
     )
     
     print(f"\nEnvironment created:")
