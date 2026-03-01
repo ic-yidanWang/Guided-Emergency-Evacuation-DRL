@@ -130,7 +130,10 @@ def main():
         obstacle_configs, domain,
         memory_step_reward_scale, memory_first_reward_scale, memory_exit_reward_scale,
     ):
-        import matplotlib.pyplot as plt
+        """Run conformal snapshot. Always draw in a headless Figure and save to file (no main window)."""
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+
         v_cfg = config.get('value_conformal', {})
         do_value = do_value_conformal
         if not do_value:
@@ -215,7 +218,10 @@ def main():
             out_dir = v_cfg.get('output_dir') or sim_out
             base_name = (v_cfg.get('figure_name') or 'conformal_value_interval.png').replace('.png', '')
             figure_name = f"{base_name}_ep{episode_label}_{label_suffix}.png"
-            fig, (ax_traj, ax_val) = plt.subplots(1, 2, figsize=(14, 5))
+            fig_to_save = Figure(figsize=(14, 5))
+            FigureCanvasAgg(fig_to_save)
+            ax_traj = fig_to_save.add_subplot(121)
+            ax_val = fig_to_save.add_subplot(122)
             ax_traj.set_aspect('equal')
             ax_traj.set_xlim(float(env_cal.L[0, 0]), float(env_cal.L[0, 1]))
             ax_traj.set_ylim(float(env_cal.L[1, 0]), float(env_cal.L[1, 1]))
@@ -241,12 +247,11 @@ def main():
             ax_val.set_title('Conformal value interval by step')
             ax_val.legend(loc='best')
             ax_val.grid(True, alpha=0.3)
-            fig.suptitle(f'Value conformal — episode {episode_label}', fontsize=12)
-            fig.tight_layout()
+            fig_to_save.suptitle(f'Value conformal — episode {episode_label}', fontsize=12)
+            fig_to_save.tight_layout()
             os.makedirs(out_dir, exist_ok=True)
             out_path = os.path.join(out_dir, figure_name)
-            fig.savefig(out_path, dpi=150)
-            plt.close(fig)
+            fig_to_save.savefig(out_path, dpi=150)
             print(f"  Value conformal: saved {out_path} (quantile={cf.quantile:.4f})")
 
     fig, ax_evac, ax_reward = None, None, None
@@ -340,6 +345,15 @@ def main():
 
         # Conformal snapshot every N episodes
         if do_conformal and conformal_every_n > 0 and (ep + 1) % conformal_every_n == 0:
+            if do_visualize and ax_evac is not None and fig is not None:
+                ax_evac.clear()
+                ax_evac.set_xlim(0, domain['x'])
+                ax_evac.set_ylim(0, domain['y'])
+                ax_evac.set_aspect('equal')
+                ax_evac.text(0.5, 0.5, 'Evaluating Conformal Prediction...\nPlease Wait',
+                             transform=ax_evac.transAxes, fontsize=14, ha='center', va='center')
+                fig.canvas.draw_idle()
+                fig.canvas.flush_events()
             _run_conformal_snapshot(
                 agent, config, episode_label=ep + 1, label_suffix='snapshot',
                 guide_boundary_margin=guide_boundary_margin,
