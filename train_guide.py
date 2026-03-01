@@ -70,6 +70,7 @@ def main():
     min_lr_ratio = float(train_cfg.get('min_lr_ratio', 0.1))
     exploration_noise_std = float(train_cfg.get('exploration_noise_std', 0.25))
     exploration_decay = float(train_cfg.get('exploration_decay', 0.995))
+    use_visit_pathfinding_when_alone = config.get('guide_parameters', {}).get('use_visit_pathfinding_when_alone', False)
     # Using on-policy learning: update immediately with current policy's experiences
     # This ensures reward and state transitions are always consistent with the current policy
 
@@ -78,21 +79,22 @@ def main():
         return
 
     env = setup_environment(config)
-    state = env.get_guide_state(control_mode=1)
+    state = env.get_guide_state()
     if state is None:
         print("No guide in env. Cannot train.")
         return
     state_dim = state.shape[0]
-    print(f"State dim: {state_dim} (dir_to_avg_pos_xy, avg_vel_dir_xy, astar_dir_xy, x_norm, y_norm, n_remaining_norm, n_escaped_norm, n_first_guided_norm, memory_sum_norm, control_mode)")
+    print(f"State dim: {state_dim} (dir_cos, dir_sin, vel_cos, vel_sin, dist_to_centroid_norm, astar_cos, astar_sin, x_norm, y_norm, n_remaining_norm); critic extras: 4 (n_escaped_norm, n_first_guided_norm, memory_sum_norm, control_mode)")
     if use_visit_pathfinding_when_alone:
         print("Visit pathfinding when alone: enabled (guide uses least-visited cell + A* when no evacuees in perception)")
     print("Action: (vx, vy) continuous in [-1, 1]^2")
     print(f"Boundary penalty: {'on' if use_boundary_penalty else 'off'} (scale={guide_boundary_penalty_scale}), Corner penalty: {'on' if use_corner_penalty else 'off'} (scale={guide_corner_penalty_scale})")
 
-    # Using Q(s,a) critic for advantage calculation (on-policy learning), with a = (vx, vy)
+    # Using Q(s, extras, a) critic for advantage calculation (on-policy learning), with a = (vx, vy)
     agent = ActorCritic(
         state_dim=state_dim,
         action_dim=2,
+        critic_extra_dim=4,
         hidden_sizes=(64, 64),
         lr_actor=lr_actor,
         lr_critic=lr_critic,
@@ -124,7 +126,6 @@ def main():
     guide_size = config.get('guide_parameters', {}).get('guide_size', 0.25)
     guide_radius = config.get('guide_parameters', {}).get('guide_radius')
     perception_radius = config.get('guide_parameters', {}).get('perception_radius', 2.5)
-    use_visit_pathfinding_when_alone = config.get('guide_parameters', {}).get('use_visit_pathfinding_when_alone', False)
 
     conformal_every_n = int(value_conformal_cfg.get('every_n_episodes', 0)) if do_value_conformal else 0
 
@@ -183,15 +184,17 @@ def main():
             traj = []
             has_evacuee = env.has_evacuees_in_guide_perception()
             use_scripted = (not has_evacuee) and use_visit_when_alone
-            s = env.get_guide_state(control_mode=0 if use_scripted else 1)
+            s = env.get_guide_state()
             if s is None:
                 return traj, start_pos
             for _ in range(steps_per_episode):
                 has_evacuee = env.has_evacuees_in_guide_perception()
                 use_scripted = (not has_evacuee) and use_visit_when_alone
-                s = env.get_guide_state(control_mode=0 if use_scripted else 1)
+                control_mode = 0 if use_scripted else 1
+                s = env.get_guide_state()
                 if s is None:
                     break
+                extras = env.get_guide_critic_extras(control_mode=control_mode)
                 if use_scripted:
                     dx, dy = env.get_visit_pathfinding_direction()
                     a = np.array([dx, dy], dtype=np.float32)
@@ -202,8 +205,8 @@ def main():
                 done = env.step_guided(guide_actions=guide_actions, max_guide_speed=max_guide_speed)
                 r = _reward_fn(env)
                 pos = env.get_guide_position()
-                traj.append((s.copy(), r, pos))
-                s_next = env.get_guide_state(control_mode=1)
+                traj.append((s.copy(), extras.copy(), r, pos))
+                s_next = env.get_guide_state()
                 s = s_next if s_next is not None else s
                 if done:
                     break
@@ -233,18 +236,18 @@ def main():
 
             # ----- Value conformal -----
             if do_value:
-                calibration_trajectories_value = [[(s, r) for s, r, _ in t] for _, t in calibration_with_start]
+                calibration_trajectories_value = [[(s, extras, r) for s, extras, r, _ in t] for _, t in calibration_with_start]
                 alpha_v = float(v_cfg.get('alpha', 0.1))
                 cf = ConformalValue(agent, gamma=gamma).calibrate(calibration_trajectories_value, alpha=alpha_v)
-                trajectory_xy = [eval_start_pos] + [pos for (_, _, pos) in eval_traj if pos is not None]
+                trajectory_xy = [eval_start_pos] + [pos for (_, _, _, pos) in eval_traj if pos is not None]
                 trajectory_xy = [p for p in trajectory_xy if p is not None]
                 steps, values, lowers, uppers, empirical_returns = [], [], [], [], []
                 T = len(eval_traj)
                 for t in range(T):
-                    s, r, _ = eval_traj[t]
-                    v = cf.predict(s)
-                    lo, hi = cf.interval(s)
-                    G_t = sum((gamma ** (k - t)) * eval_traj[k][1] for k in range(t, T))
+                    s, extras, r, _ = eval_traj[t]
+                    v = cf.predict(s, extras)
+                    lo, hi = cf.interval(s, extras)
+                    G_t = sum((gamma ** (k - t)) * eval_traj[k][2] for k in range(t, T))
                     steps.append(t)
                     values.append(v)
                     lowers.append(lo)
@@ -320,9 +323,10 @@ def main():
             has_evacuee = env.has_evacuees_in_guide_perception()
             use_scripted = (not has_evacuee) and use_visit_pathfinding_when_alone
             control_mode = 0 if use_scripted else 1
-            s = env.get_guide_state(control_mode=control_mode)
+            s = env.get_guide_state()
             if s is None:
                 break
+            extras = env.get_guide_critic_extras(control_mode=control_mode)
             if use_scripted:
                 dx, dy = env.get_visit_pathfinding_direction()
                 a = np.array([dx, dy], dtype=np.float32)
@@ -335,7 +339,8 @@ def main():
 
             guide_actions = [[float(a[0]), float(a[1])]]
             done = env.step_guided(guide_actions=guide_actions, max_guide_speed=max_guide_speed)
-            s_next = env.get_guide_state(control_mode=1)
+            s_next = env.get_guide_state()
+            extras_next = env.get_guide_critic_extras(control_mode=1)
             r = (
                 - env.get_guide_boundary_penalty(
                     margin=guide_boundary_margin,
@@ -352,10 +357,11 @@ def main():
             ep_reward += r
 
             s_next_valid = s_next if s_next is not None else s
+            extras_next_valid = extras_next if s_next is not None else extras
 
             # On-policy learning: only update when we used RL (not scripted pathfinding)
             if not use_scripted:
-                agent.update(s, a, r, s_next_valid, done=done)
+                agent.update(s, a, r, s_next_valid, done=done, extras=extras, extras_next=extras_next_valid)
 
             if s_next is not None:
                 s = s_next

@@ -119,7 +119,8 @@ def setup_environment(config):
         memory_astar_update_interval_n=config['guide_parameters'].get('memory_astar_update_interval_n', 5),
         visit_grid_norm_x=config['guide_parameters'].get('visit_grid_norm_x', 0.1),
         visit_grid_norm_y=config['guide_parameters'].get('visit_grid_norm_y', 0.1),
-        use_visit_pathfinding_when_alone=config['guide_parameters'].get('use_visit_pathfinding_when_alone', False)
+        use_visit_pathfinding_when_alone=config['guide_parameters'].get('use_visit_pathfinding_when_alone', False),
+        visit_pathfinding_visit_increment=config['guide_parameters'].get('visit_pathfinding_visit_increment', 5)
     )
     
     print(f"\nEnvironment created:")

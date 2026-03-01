@@ -128,15 +128,15 @@ class ActorGoFind(nn.Module):
 
 
 class Critic(nn.Module):
-    """State-action value function Q(s, a): (state, action) -> scalar."""
+    """State-action value function Q(s, a, extras): (state, extras, action) -> scalar. extras are passed to critic only."""
 
-    def __init__(self, state_dim, action_dim, hidden_sizes=(64, 64)):
+    def __init__(self, state_dim, action_dim, critic_extra_dim=0, hidden_sizes=(64, 64)):
         super().__init__()
-        input_dim = state_dim + action_dim
+        input_dim = state_dim + critic_extra_dim + action_dim
         self.net = mlp([input_dim] + list(hidden_sizes) + [1], output_activation=nn.Identity)
 
-    def forward(self, s, a):
-        x = torch.cat([s, a], dim=-1)
+    def forward(self, s, a, extras):
+        x = torch.cat([s, extras, a], dim=-1)
         return self.net(x).squeeze(-1)
 
 
@@ -163,6 +163,7 @@ class ActorCritic(nn.Module):
         self,
         state_dim,
         action_dim=2,
+        critic_extra_dim=4,
         hidden_sizes=(64, 64),
         lr_actor=3e-4,
         lr_critic=1e-3,
@@ -173,7 +174,7 @@ class ActorCritic(nn.Module):
     ):
         super().__init__()
         self.actor = ActorMove(state_dim, hidden_sizes, log_std_init=log_std_init)
-        self.critic = Critic(state_dim, action_dim, hidden_sizes)
+        self.critic = Critic(state_dim, action_dim, critic_extra_dim=critic_extra_dim, hidden_sizes=hidden_sizes)
         self.gamma = gamma
         opt_type = (optimizer_type or "adam").lower()
         wd = float(weight_decay) if weight_decay is not None else 0.0
@@ -196,31 +197,35 @@ class ActorCritic(nn.Module):
         """Return action tensor (batch, action_dim) for critic target."""
         return self.actor.get_action(s, deterministic=deterministic)
 
-    def get_value(self, s):
-        """V(s) = Q(s, π(s)): value at s under current policy (for conformal / display)."""
+    def get_value(self, s, extras):
+        """V(s) = Q(s, extras, π(s)): value at s under current policy (for conformal / display). extras: (4,) array."""
         if isinstance(s, np.ndarray):
             s = torch.from_numpy(s).float().unsqueeze(0)
+        if isinstance(extras, np.ndarray):
+            extras = torch.from_numpy(extras).float().unsqueeze(0)
         with torch.no_grad():
             a = self.get_action_tensor(s, deterministic=True)
-            return self.critic(s, a).squeeze(0).item()
+            return self.critic(s, a, extras).squeeze(0).item()
 
-    def update(self, s, a, r, s_next, done):
+    def update(self, s, a, r, s_next, done, extras, extras_next):
         """
         On-policy TD update:
-        - Critic: minimize (Q(s,a) - (r + γ Q(s', π(s'))))^2
-        - Actor: policy gradient with advantage A = td_target - Q(s,a)
+        - Critic: minimize (Q(s,extras,a) - (r + γ Q(s',extras_next,π(s'))))^2
+        - Actor: policy gradient with advantage A = td_target - Q(s,extras,a)
         """
         s = torch.as_tensor(s, dtype=torch.float32).unsqueeze(0)
         a = torch.as_tensor(a, dtype=torch.float32).unsqueeze(0)
+        extras = torch.as_tensor(extras, dtype=torch.float32).unsqueeze(0)
+        extras_next = torch.as_tensor(extras_next, dtype=torch.float32).unsqueeze(0)
         r = float(r)
         s_next = torch.as_tensor(s_next, dtype=torch.float32).unsqueeze(0)
         done = bool(done)
 
         # Critic update
-        q = self.critic(s, a).squeeze()
+        q = self.critic(s, a, extras).squeeze()
         with torch.no_grad():
             a_next = self.get_action_tensor(s_next, deterministic=True)
-            q_next = self.critic(s_next, a_next).squeeze() if not done else 0.0
+            q_next = self.critic(s_next, a_next, extras_next).squeeze() if not done else 0.0
             td_target = r + self.gamma * q_next
         loss_critic = F.mse_loss(q, td_target)
         self.opt_critic.zero_grad()

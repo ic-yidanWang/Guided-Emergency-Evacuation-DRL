@@ -16,7 +16,7 @@ class ConformalValue:
     def __init__(self, agent, gamma=0.99):
         """
         Args:
-            agent: ActorCritic (or any with get_value(s) returning scalar).
+            agent: ActorCritic (or any with get_value(s, extras) returning scalar).
             gamma: Discount for computing returns (should match training).
         """
         self.agent = agent
@@ -31,18 +31,20 @@ class ConformalValue:
 
         Args:
             calibration_trajectories: List of episodes. Each episode is a list of
-                (state, reward) tuples: [(s_0, r_0), (s_1, r_1), ...].
+                (state, extras, reward) tuples: [(s_0, e_0, r_0), (s_1, e_1, r_1), ...].
+                extras are the 4-dim critic extras (n_escaped_norm, n_first_guided_norm, memory_sum_norm, control_mode).
             alpha: Miscoverage level (target coverage is 1 - alpha, e.g. alpha=0.1 -> 90%).
 
         Returns:
             self (for chaining).
         """
-        states, returns = [], []
+        states, extras_list, returns = [], [], []
         for episode in calibration_trajectories:
             if not episode:
                 continue
-            rewards = [r for _, r in episode]
-            sts = [s for s, _ in episode]
+            rewards = [r for _, _, r in episode]
+            sts = [s for s, _, _ in episode]
+            exts = [e for _, e, _ in episode]
             # Empirical return from step t: G_t = sum_{k=t}^{T-1} gamma^{k-t} r_k
             T = len(rewards)
             for t in range(T):
@@ -50,6 +52,7 @@ class ConformalValue:
                 for k in range(t, T):
                     G_t += (self.gamma ** (k - t)) * rewards[k]
                 states.append(sts[t])
+                extras_list.append(exts[t])
                 returns.append(G_t)
         returns = np.asarray(returns, dtype=np.float64)
         n = len(states)
@@ -58,7 +61,7 @@ class ConformalValue:
         # Nonconformity scores E_i = |G_i - V(s_i)|
         scores = np.zeros(n)
         for i in range(n):
-            v_s = self.agent.get_value(states[i])
+            v_s = self.agent.get_value(states[i], extras_list[i])
             scores[i] = abs(returns[i] - v_s)
         # Split conformal: q = (1-alpha)(1+1/n) quantile of scores
         idx = min(int(np.ceil((n + 1) * (1.0 - alpha))), n) - 1

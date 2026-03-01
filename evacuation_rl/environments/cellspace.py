@@ -953,7 +953,7 @@ class GuidedCellSpace(Cell_Space):
                  memory_increase_rate=5.0, memory_decay_rate=0.2,
                  memory_astar_thres_around=0.3, memory_astar_thres_out=0.2, memory_astar_update_interval_n=5,
                  visit_grid_norm_x=0.1, visit_grid_norm_y=0.1,
-                 use_visit_pathfinding_when_alone=False):
+                 use_visit_pathfinding_when_alone=False, visit_pathfinding_visit_increment=5):
         self.n_guide_agent = max(0, int(n_guide_agent))
         self.guide_radius = guide_radius
         self.perception_radius = float(perception_radius)
@@ -967,6 +967,7 @@ class GuidedCellSpace(Cell_Space):
         self.memory_astar_thres_out = float(memory_astar_thres_out)
         self.memory_astar_update_interval_n = max(1, int(memory_astar_update_interval_n))
         self.use_visit_pathfinding_when_alone = bool(use_visit_pathfinding_when_alone)
+        self._visit_pathfinding_visit_increment = max(1, int(visit_pathfinding_visit_increment))
         self.guide_initial_position_mode = str(guide_initial_position_mode).strip().lower()
         self.guide_initial_position = np.array(guide_initial_position, dtype=float) if guide_initial_position is not None else None
         # Store obstacle configs BEFORE calling parent __init__ (which calls initialize_particles)
@@ -2355,12 +2356,13 @@ class GuidedCellSpace(Cell_Space):
     def _get_evacuees_perception_state(self, guide_pos):
         """
         Within perception_radius (circular range), compute:
-        - Direction from guide to average position of evacuees (unit vector, 2D).
-        - Average velocity direction of evacuees (unit vector, 2D).
-        Returns (dir_to_avg_pos_x, dir_to_avg_pos_y, avg_vel_dir_x, avg_vel_dir_y).
-        When no evacuees in range, returns (0, 0, 0, 0).
+        - Direction from guide to average position of evacuees as (cos, sin) of angle (2D).
+        - Average velocity direction of evacuees as (cos, sin) of angle (2D).
+        - Distance from guide to crowd centroid, normalized by perception_radius (in [0, 1] when in range).
+        Returns (dir_cos, dir_sin, vel_cos, vel_sin, dist_to_centroid_norm).
+        When no evacuees in range, returns (0, 0, 0, 0, 0).
         """
-        r = self.perception_radius
+        r = float(self.perception_radius)
         gx, gy = float(guide_pos[0]), float(guide_pos[1])
         positions = []
         velocities = []
@@ -2375,7 +2377,7 @@ class GuidedCellSpace(Cell_Space):
                     positions.append([p.position[0], p.position[1]])
                     velocities.append([p.velocity[0], p.velocity[1]])
         if not positions:
-            return np.float32(0.0), np.float32(0.0), np.float32(0.0), np.float32(0.0)
+            return np.float32(0.0), np.float32(0.0), np.float32(0.0), np.float32(0.0), np.float32(0.0)
         pos_arr = np.array(positions, dtype=np.float64)
         vel_arr = np.array(velocities, dtype=np.float64)
         avg_x = float(np.mean(pos_arr[:, 0]))
@@ -2383,17 +2385,19 @@ class GuidedCellSpace(Cell_Space):
         dx = avg_x - gx
         dy = avg_y - gy
         norm_pos = np.sqrt(dx * dx + dy * dy) + 1e-10
-        dir_to_avg_x = float(dx / norm_pos)
-        dir_to_avg_y = float(dy / norm_pos)
+        # Direction as cos/sin of angle (same as unit vector; explicit for clarity)
+        angle_dir = np.arctan2(dy, dx)
+        dir_cos = np.float32(np.cos(angle_dir))
+        dir_sin = np.float32(np.sin(angle_dir))
+        # Distance from guide to centroid, normalized by perception_radius
+        dist_to_centroid_norm = np.float32(min(1.0, norm_pos / r))
         avg_vx = float(np.mean(vel_arr[:, 0]))
         avg_vy = float(np.mean(vel_arr[:, 1]))
         norm_vel = np.sqrt(avg_vx * avg_vx + avg_vy * avg_vy) + 1e-10
-        avg_vel_dir_x = float(avg_vx / norm_vel)
-        avg_vel_dir_y = float(avg_vy / norm_vel)
-        return (
-            np.float32(dir_to_avg_x), np.float32(dir_to_avg_y),
-            np.float32(avg_vel_dir_x), np.float32(avg_vel_dir_y),
-        )
+        angle_vel = np.arctan2(avg_vy, avg_vx)
+        vel_cos = np.float32(np.cos(angle_vel))
+        vel_sin = np.float32(np.sin(angle_vel))
+        return (dir_cos, dir_sin, vel_cos, vel_sin, dist_to_centroid_norm)
 
     def has_evacuees_in_guide_perception(self):
         """Return True if at least one evacuee is within perception_radius of the first guide."""
@@ -2456,16 +2460,15 @@ class GuidedCellSpace(Cell_Space):
             return None, None
         return cx / count, cy / count
 
-    def get_guide_state(self, normalize=True, n_particle_norm=100.0, control_mode=None):
+    def get_guide_state(self, normalize=True, n_particle_norm=100.0):
         """
-        Get state for the first guide agent.
-        13-dimensional: [dir_to_avg_pos_xy, avg_vel_dir_xy, astar_dir_xy, x_norm, y_norm,
-                        n_remaining_norm, n_escaped_this_step_norm, n_first_guided_this_step_norm, memory_sum_norm, control_mode].
-        - First four: within perception_radius, direction to crowd centroid and crowd average velocity unit direction.
-        - Next two: A* direction to nearest exit (to compare with crowd movement).
+        Get state for the first guide agent (actor input only; critic gets extras via get_guide_critic_extras).
+        10-dimensional: [dir_cos, dir_sin, vel_cos, vel_sin, dist_to_centroid_norm, astar_cos, astar_sin, x_norm, y_norm, n_remaining_norm].
+        - First five: within perception_radius, (cos, sin) of direction to crowd centroid, (cos, sin) of crowd average velocity
+          direction, and distance from guide to crowd centroid normalized by perception_radius [0,1].
+        - Next two: (cos, sin) of A* direction to nearest exit.
         - Next two: guide's normalized position in the room (x_norm, y_norm in [0,1]).
-        - Next four (for critic): n_remaining/n0, n_escaped_this_step/n0, n_first_guided_this_step/n0, memory_sum/n0.
-        - Last: control_mode (1.0 = using RL, 0.0 = using traditional visit pathfinding). If None, defaults to 1.0.
+        - Last: n_remaining/n0.
         Returns None if no guide.
         """
         guide_pos = None
@@ -2478,12 +2481,14 @@ class GuidedCellSpace(Cell_Space):
                 break
         if guide_pos is None:
             return None
-        d1, d2, v1, v2 = self._get_evacuees_perception_state(guide_pos)
+        dir_cos, dir_sin, vel_cos, vel_sin, dist_to_centroid_norm = self._get_evacuees_perception_state(guide_pos)
         if self.Exit and len(self.Exit) > 0:
             _, astar_dx, astar_dy = self._astar_distance_and_direction_from_xy(guide_pos[0], guide_pos[1])
-            astar_dx, astar_dy = np.float32(astar_dx), np.float32(astar_dy)
+            angle_astar = np.arctan2(astar_dy, astar_dx)
+            astar_cos = np.float32(np.cos(angle_astar))
+            astar_sin = np.float32(np.sin(angle_astar))
         else:
-            astar_dx, astar_dy = np.float32(0.0), np.float32(0.0)
+            astar_cos, astar_sin = np.float32(0.0), np.float32(0.0)
         xmin, xmax = float(self.L[0, 0]), float(self.L[0, 1])
         ymin, ymax = float(self.L[1, 0]), float(self.L[1, 1])
         x_span = xmax - xmin + 1e-10
@@ -2492,27 +2497,39 @@ class GuidedCellSpace(Cell_Space):
         y_norm = np.float32(np.clip((guide_pos[1] - ymin) / y_span, 0.0, 1.0))
         n0 = max(1, getattr(self, 'n_particle_initial', self.Number))
         n_remaining = 0
+        for c in self.Cells:
+            for p in c.Particles:
+                if getattr(p, 'is_guide', False):
+                    continue
+                n_remaining += 1
+        n_remaining_norm = np.float32(n_remaining / n0)
+        return np.array(
+            [dir_cos, dir_sin, vel_cos, vel_sin, dist_to_centroid_norm, astar_cos, astar_sin, x_norm, y_norm, n_remaining_norm],
+            dtype=np.float32,
+        )
+
+    def get_guide_critic_extras(self, control_mode=None):
+        """
+        Return the four scalars passed to the critic in addition to state and action:
+        (n_escaped_norm, n_first_guided_norm, memory_sum_norm, control_mode_float).
+        control_mode: True/1 = RL, False/0 = scripted visit pathfinding; None defaults to 1.0.
+        """
+        n0 = max(1, getattr(self, 'n_particle_initial', self.Number))
         n_first_guided_this_step = 0
         memory_sum = 0.0
         for c in self.Cells:
             for p in c.Particles:
                 if getattr(p, 'is_guide', False):
                     continue
-                n_remaining += 1
                 if getattr(p, 'just_guided_this_step', False):
                     n_first_guided_this_step += 1
                 memory_sum += float(getattr(p, 'memory_strength', 0.0))
         n_escaped_this_step = int(getattr(self, '_n_escaped_this_step', 0))
-        n_remaining_norm = np.float32(n_remaining / n0)
         n_escaped_norm = np.float32(n_escaped_this_step / n0)
         n_first_guided_norm = np.float32(n_first_guided_this_step / n0)
         memory_sum_norm = np.float32(memory_sum / n0)
         ctrl = np.float32(1.0 if control_mode is None else (1.0 if control_mode else 0.0))
-        return np.array(
-            [d1, d2, v1, v2, astar_dx, astar_dy, x_norm, y_norm,
-             n_remaining_norm, n_escaped_norm, n_first_guided_norm, memory_sum_norm, ctrl],
-            dtype=np.float32,
-        )
+        return np.array([n_escaped_norm, n_first_guided_norm, memory_sum_norm, ctrl], dtype=np.float32)
 
     def get_guide_position(self):
         """Return (x, y) of the first guide agent, or None if no guide."""
@@ -2846,11 +2863,15 @@ class GuidedCellSpace(Cell_Space):
             done = True
             return done
 
-        # Record visit: increment visit grid at guide's current position (before moving)
+        # Record visit: increment visit grid at guide's current position (before moving).
+        # When using visit pathfinding (no one in perception), add a larger increment so we don't re-target the same empty area.
         guide_pos = self.get_guide_position()
         if guide_pos is not None and hasattr(self, '_visit_count'):
             vi, vj = self._world_to_visit_cell(guide_pos[0], guide_pos[1])
-            self._visit_count[vi, vj] += 1
+            if self.use_visit_pathfinding_when_alone and not self.has_evacuees_in_guide_perception():
+                self._visit_count[vi, vj] += self._visit_pathfinding_visit_increment
+            else:
+                self._visit_count[vi, vj] += 1
 
         self.Zero_acc()
         # Visibility update is expensive (BFS per cell); do every 5 steps

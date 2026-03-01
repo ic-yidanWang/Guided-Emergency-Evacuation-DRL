@@ -218,7 +218,7 @@ Emergency-evacuation-Deep-reinforcement-learning/
 - ✅ Framework implemented
 - ✅ Stationary guides working
 - ✅ Mobile guide RL training (Actor-Critic) in `train_guide.py`
-- ✅ 13D state (dir_to_avg_pos_xy, avg_vel_dir_xy, astar_dir_xy, x_norm, y_norm, n_remaining_norm, n_escaped_norm, n_first_guided_norm, memory_sum_norm, control_mode) and reward design documented in README
+- ✅ 10D state (dir_cos/sin, vel_cos/sin, dist_to_centroid_norm, astar_cos/sin, x_norm, y_norm, n_remaining_norm) + 4 critic extras (n_escaped_norm, n_first_guided_norm, memory_sum_norm, control_mode) and reward design documented in README
 
 **Files:**
 
@@ -341,7 +341,7 @@ Or with standard Python:
 python train_guide.py
 ```
 
-Reward terms and the 13-dimensional guide state (perception range, A* to exit, normalized position, n_remaining/n_escaped/n_first_guided/memory_sum, and control_mode for critic) are described in [Guide Agent Training (RL)](#guide-agent-training-rl). Config is in `config/simulation_config.json` under `train`.
+Reward terms and the 14-dimensional guide state (perception: dir/vel as cos/sin, dist_to_centroid_norm, A* to exit, normalized position, n_remaining/n_escaped/n_first_guided/memory_sum, and control_mode for critic) are described in [Guide Agent Training (RL)](#guide-agent-training-rl). Config is in `config/simulation_config.json` under `train`.
 
 ### 4. View Available Commands
 
@@ -480,37 +480,40 @@ Guide agents (stationary or mobile) help direct evacuees:
 
 The mobile guide is trained with **Actor-Critic** (continuous action). The following design keeps the reward and state consistent and learnable.
 
-### Guide State (13 dimensions)
+### Guide State (10 dimensions, 0-9) and Critic Extras (4 dimensions, 10-13)
 
-The guide observes a **13-dimensional state**: (1) from a **circular perception range** (`perception_radius`), the **direction to the crowd centroid** and the **unit direction of the crowd’s average velocity**; (2) the **A\*** direction to the nearest exit (to compare with crowd movement); (3) the **guide’s normalized position** in the room (`x_norm`, `y_norm` in [0, 1]); (4) **scalars for critic** (all normalized by initial particle count): **remaining evacuee count**, **number escaped this step**, **number first-guided this step**, and **sum of evacuees’ memory strength** (global progress and guide-impact signals); (5) **control_mode**: 1.0 when using RL policy, 0.0 when using scripted visit-based pathfinding (see below).
-
-
-| Index | Name                    | Range / Type          | Reason                                                                                                                           |
-| ----- | ----------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| 0     | `dir_to_avg_pos_x`      | unit vector component | Direction from guide to the average position of evacuees in perception range (x).                                             |
-| 1     | `dir_to_avg_pos_y`      | unit vector component | Same for y.                                                                                                                      |
-| 2     | `avg_vel_dir_x`         | unit vector component | **Unit direction of crowd average velocity** (x). Lets the guide know if the crowd is evacuating or moving randomly.           |
-| 3     | `avg_vel_dir_y`         | unit vector component | Same for y.                                                                                                                      |
-| 4     | `astar_dir_x`          | unit vector component | A* direction to nearest exit (x). Used to compare with `avg_vel_dir` to see if the crowd is moving toward the exit.             |
-| 5     | `astar_dir_y`          | unit vector component | Same for y.                                                                                                                      |
-| 6     | `x_norm`                | [0, 1]                | Guide’s x-position in the room, normalized by domain bounds. So the guide knows its rough location (e.g. near left/right walls). |
-| 7     | `y_norm`                | [0, 1]                | Same for y. Together with `x_norm`, gives the guide’s global position in the room.                                             |
-| 8     | `n_remaining_norm`      | [0, 1]                | Remaining evacuee count / initial count. Tells the critic how many people are still in the room.                                |
-| 9     | `n_escaped_norm`        | [0, 1]                | Number of evacuees who exited this step / initial count. One-step escape progress.                                              |
-| 10    | `n_first_guided_norm`  | [0, 1]                | Number of evacuees first guided this step / initial count. Guide-impact signal.                                                 |
-| 11    | `memory_sum_norm`       | [0, ∞) normalized     | Sum of evacuees’ memory strength / initial count. How much “learned route” the crowd carries.                                    |
-| 12    | `control_mode`         | 0.0 or 1.0            | 1.0 = RL policy in control; 0.0 = scripted visit-based pathfinding (when alone and `use_visit_pathfinding_when_alone` is true).   |
+The **state** (actor input) is **10-dimensional**: (1) from a **circular perception range** (`perception_radius`), the **direction to the crowd centroid** and **crowd average velocity direction** as **(cos, sin)** of their angles, plus **distance from guide to crowd centroid** normalized by perception_radius [0, 1]; (2) the **A** direction to the nearest exit (to compare with crowd movement); (3) the **guide’s normalized position** in the room (`x_norm`, `y_norm` in [0, 1]); (4) **scalars for critic** (all normalized by initial particle count): **remaining evacuee count**, **number escaped this step**, **number first-guided this step**, and **sum of evacuees’ memory strength** (global progress and guide-impact signals); (5) **control_mode**: 1.0 when using RL policy, 0.0 when using scripted visit-based pathfinding (see below).
 
 
-When no evacuees are in the perception range, the first four components are 0. When there are no exits, components 4–5 are 0. The perception radius is configured in `config/simulation_config.json` under `guide_parameters.perception_radius`.
+| Index | Name                    | Range / Type      | Reason                                                                                                                           |
+| ----- | ----------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| 0     | `dir_cos`               | cos(θ)            | Cos of angle from guide to crowd centroid in perception range.                                                                   |
+| 1     | `dir_sin`               | sin(θ)            | Sin of angle from guide to crowd centroid.                                                                                       |
+| 2     | `vel_cos`               | cos(φ)            | Cos of angle of crowd average velocity direction.                                                                                |
+| 3     | `vel_sin`               | sin(φ)            | Sin of angle of crowd average velocity direction.                                                                                |
+| 4     | `dist_to_centroid_norm` | [0, 1]            | Distance from guide to crowd centroid, normalized by perception_radius (0 when no evacuees in range).                            |
+| 5     | `astar_cos`             | cos(ψ)            | Cos of angle of A* direction to nearest exit.                                                                                    |
+| 6     | `astar_sin`             | sin(ψ)            | Sin of angle of A* direction to nearest exit.                                                                                    |
+| 7     | `x_norm`                | [0, 1]            | Guide’s x-position in the room, normalized by domain bounds. So the guide knows its rough location (e.g. near left/right walls). |
+| 8     | `y_norm`                | [0, 1]            | Same for y. Together with `x_norm`, gives the guide’s global position in the room.                                               |
+| 9     | `n_remaining_norm`      | [0, 1]            | Remaining evacuee count / initial count. Tells the critic how many people are still in the room.                                 |
+| 10    | `n_escaped_norm`        | [0, 1]            | Number of evacuees who exited this step / initial count. One-step escape progress.                                               |
+| 11    | `n_first_guided_norm`   | [0, 1]            | Number of evacuees first guided this step / initial count. Guide-impact signal.                                                  |
+| 12    | `memory_sum_norm`       | [0, ∞) normalized | Sum of evacuees’ memory strength / initial count. How much “learned route” the crowd carries.                                    |
+| 13    | `control_mode`          | 0.0 or 1.0        | 1.0 = RL policy in control; 0.0 = scripted visit-based pathfinding (when alone and `use_visit_pathfinding_when_alone` is true).  |
 
-**Critic input:** The critic is **Q(s, a)**. Its input is the **state s** (the 13 dimensions in the table above) and the **action a** = (vx, vy) from the actor. So the critic network input dimension is **state_dim + action_dim** (e.g. 13 + 2 = 15). The interface `get_value(s)` used for Conformal and plots returns **Q(s, π(s))** (the value of the current policy at state s).
 
-State is computed in `evacuation_rl/environments/cellspace.py` via `get_guide_state()` and `_get_evacuees_perception_state()`.
+The **state** (actor input) is only indices 0–9. Indices 10–13 are **critic extras**, passed via `get_guide_critic_extras(control_mode)` and not part of the state vector.
+
+When no evacuees are in the perception range, the first five components (dir_cos, dir_sin, vel_cos, vel_sin, dist_to_centroid_norm) are 0. When there are no exits, components 5–6 are 0. The perception radius is configured in `config/simulation_config.json` under `guide_parameters.perception_radius`.
+
+**Critic input:** The critic is **Q(s, extras, a)**. Its input is **state s** (10 dims), **extras** (4 dims from `get_guide_critic_extras(control_mode)`), and **action a** = (vx, vy). So the critic network input dimension is **10 + 4 + 2 = 16**. The interface `get_value(s, extras)` used for Conformal and plots returns **Q(s, extras, π(s))** (the value of the current policy at state s with extras).
+
+State is computed in `evacuation_rl/environments/cellspace.py` via `get_guide_state()` and `_get_evacuees_perception_state()`; extras via `get_guide_critic_extras(control_mode)`.
 
 ### Guide Reward (per step)
 
-Total reward is the sum of the following（已移除基于“圈内人数密度”的 dense reward 和 toward crowd 项）:
+Total reward is the sum of the following:
 
 
 | Term                            | Formula / Behavior                                                       | Reason                                                                                                                                                        |
@@ -526,13 +529,14 @@ Config for training (e.g. scales, margin, threshold) is under `config/simulation
 
 ### Visit-based pathfinding when alone
 
-When **no evacuees** are within the guide’s `perception_radius`, the guide can optionally use a **scripted visit-based pathfinding** instead of the RL policy (config: `guide_parameters.use_visit_pathfinding_when_alone`). A coarse **visit grid** (normalized in [0, 1]) is used: the guide records how often each grid cell has been visited and moves via A\* toward the **globally least-visited** cell.
+When **no evacuees** are within the guide’s `perception_radius`, the guide can optionally use a **scripted visit-based pathfinding** instead of the RL policy (config: `guide_parameters.use_visit_pathfinding_when_alone`). A coarse **visit grid** (normalized in [0, 1]) is used: the guide records how often each grid cell has been visited and moves via A toward the **globally least-visited** cell.
 
-- **Reachable cells only:** At **initialization**, which cells are valid targets is determined by **A\* reachability**: from the domain center and from every exit, a BFS is run on the A\* obstacle grid; any visit cell whose center maps to an A\* cell **not** reached by this BFS is marked as blocked and excluded from the “least-visited” search. There is **no** obstacle-area-ratio parameter; unreachable regions are purely from connectivity.
+- **Reachable cells only:** At **initialization**, which cells are valid targets is determined by **A reachability**: from the domain center and from every exit, a BFS is run on the A obstacle grid; any visit cell whose center maps to an A cell **not** reached by this BFS is marked as blocked and excluded from the “least-visited” search. There is **no** obstacle-area-ratio parameter; unreachable regions are purely from connectivity.
 - **Unreachable goal from current position:** If the chosen least-visited cell is unreachable from the guide’s **current** position (e.g. disconnected region), `get_visit_pathfinding_direction()` returns **(0, 0)** so the guide does not move toward an invalid target.
 - **Config** (`config/simulation_config.json` → `guide_parameters`):
   - `visit_grid_norm_x`, `visit_grid_norm_y`: normalized cell size in [0, 1] (e.g. 0.1 → 10×10 grid).
   - `use_visit_pathfinding_when_alone`: if true, when there are no evacuees in perception, the guide uses this pathfinding and does **not** call the RL model or train (no `agent.update`). The state still includes `control_mode` (0.0 in this mode, 1.0 when using RL).
+  - `visit_pathfinding_visit_increment`: when the guide is in visit pathfinding mode (alone), each step adds this value to the current cell’s visit count instead of 1, so the guide is less likely to re-target the same empty area (default 5; configurable).
 
 ### 架构：单 Actor + Q(s,a) Critic
 
