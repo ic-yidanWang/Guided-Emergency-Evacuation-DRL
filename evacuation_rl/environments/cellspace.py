@@ -951,7 +951,9 @@ class GuidedCellSpace(Cell_Space):
                  knn_filter_obstacles=True, n_guide_agent=0,
                  guide_initial_position_mode='random', guide_initial_position=None,
                  memory_increase_rate=5.0, memory_decay_rate=0.2,
-                 memory_astar_thres_around=0.3, memory_astar_thres_out=0.2, memory_astar_update_interval_n=5):
+                 memory_astar_thres_around=0.3, memory_astar_thres_out=0.2, memory_astar_update_interval_n=5,
+                 visit_grid_norm_x=0.1, visit_grid_norm_y=0.1,
+                 use_visit_pathfinding_when_alone=False):
         self.n_guide_agent = max(0, int(n_guide_agent))
         self.guide_radius = guide_radius
         self.perception_radius = float(perception_radius)
@@ -964,6 +966,7 @@ class GuidedCellSpace(Cell_Space):
         self.memory_astar_thres_around = float(memory_astar_thres_around)
         self.memory_astar_thres_out = float(memory_astar_thres_out)
         self.memory_astar_update_interval_n = max(1, int(memory_astar_update_interval_n))
+        self.use_visit_pathfinding_when_alone = bool(use_visit_pathfinding_when_alone)
         self.guide_initial_position_mode = str(guide_initial_position_mode).strip().lower()
         self.guide_initial_position = np.array(guide_initial_position, dtype=float) if guide_initial_position is not None else None
         # Store obstacle configs BEFORE calling parent __init__ (which calls initialize_particles)
@@ -976,6 +979,85 @@ class GuidedCellSpace(Cell_Space):
         self.use_knn = use_knn
         self.knn_max_distance = knn_max_distance
         self.knn_filter_obstacles = knn_filter_obstacles
+        # Visit grid for "go to least-visited" when no one in perception (normalized [0,1] grid)
+        self._visit_norm_x = max(0.01, min(1.0, float(visit_grid_norm_x)))
+        self._visit_norm_y = max(0.01, min(1.0, float(visit_grid_norm_y)))
+        self._visit_nx = max(1, int(round(1.0 / self._visit_norm_x)))
+        self._visit_ny = max(1, int(round(1.0 / self._visit_norm_y)))
+        self._visit_count = np.zeros((self._visit_nx, self._visit_ny), dtype=np.int64)
+        self._visit_blocked = np.zeros((self._visit_nx, self._visit_ny), dtype=bool)
+        self._build_visit_grid_blocked()
+
+    def _build_visit_grid_blocked(self):
+        """
+        Mark visit cells as blocked if their center is not reachable by A* from any seed (exits + domain center).
+        Uses one BFS per seed on the A* grid; any visit cell whose center maps to an unreachable A* cell is excluded.
+        """
+        self._get_astar_grid()
+        nx, ny = self._astar_nx, self._astar_ny
+        # _astar_grid[i,j] True = blocked (obstacle). We want cells that are reachable (free and connected).
+        deltas = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+        reachable_astar = set()
+
+        def bfs_from_seed(si, sj):
+            if si < 0 or si >= nx or sj < 0 or sj >= ny or self._astar_grid[si, sj]:
+                return
+            stack = [(si, sj)]
+            while stack:
+                i, j = stack.pop()
+                if (i, j) in reachable_astar:
+                    continue
+                reachable_astar.add((i, j))
+                for di, dj in deltas:
+                    ni, nj = i + di, j + dj
+                    if 0 <= ni < nx and 0 <= nj < ny and not self._astar_grid[ni, nj] and (ni, nj) not in reachable_astar:
+                        stack.append((ni, nj))
+
+        # Seeds: domain center and each exit (so any cell reachable from exit or center is valid)
+        xmin, xmax = float(self.L[0, 0]), float(self.L[0, 1])
+        ymin, ymax = float(self.L[1, 0]), float(self.L[1, 1])
+        cx = (xmin + xmax) * 0.5
+        cy = (ymin + ymax) * 0.5
+        si, sj = self._world_to_cell(cx, cy)
+        bfs_from_seed(si, sj)
+        for e in (self.Exit or []):
+            ei, ej = self._world_to_cell(float(e[0]), float(e[1]))
+            bfs_from_seed(ei, ej)
+
+        for vi in range(self._visit_nx):
+            for vj in range(self._visit_ny):
+                wx, wy = self._visit_cell_to_world_center(vi, vj)
+                ai, aj = self._world_to_cell(wx, wy)
+                if (ai, aj) not in reachable_astar:
+                    self._visit_blocked[vi, vj] = True
+
+    def _world_to_visit_cell(self, x, y):
+        """Map world (x,y) to visit grid cell (i,j). Returns (i, j) clipped to valid range."""
+        xmin, xmax = float(self.L[0, 0]), float(self.L[0, 1])
+        ymin, ymax = float(self.L[1, 0]), float(self.L[1, 1])
+        x_span = xmax - xmin + 1e-10
+        y_span = ymax - ymin + 1e-10
+        u = np.clip((x - xmin) / x_span, 0.0, 1.0)
+        v = np.clip((y - ymin) / y_span, 0.0, 1.0)
+        i = int(u / self._visit_norm_x)
+        j = int(v / self._visit_norm_y)
+        i = min(i, self._visit_nx - 1)
+        j = min(j, self._visit_ny - 1)
+        return i, j
+
+    def _visit_cell_to_world_center(self, i, j):
+        """Return world (x, y) of the center of visit cell (i, j)."""
+        xmin, xmax = float(self.L[0, 0]), float(self.L[0, 1])
+        ymin, ymax = float(self.L[1, 0]), float(self.L[1, 1])
+        x_span = xmax - xmin + 1e-10
+        y_span = ymax - ymin + 1e-10
+        u = (i + 0.5) * self._visit_norm_x
+        v = (j + 0.5) * self._visit_norm_y
+        u = min(u, 1.0)
+        v = min(v, 1.0)
+        x = xmin + u * x_span
+        y = ymin + v * y_span
+        return x, y
 
     def region_confine(self):
         """Vectorized region confining: wall + obstacle + friction over all particles (faster than per-particle loop)."""
@@ -1645,6 +1727,9 @@ class GuidedCellSpace(Cell_Space):
             self._go_find_steps_remaining = 0
         if hasattr(self, '_go_find_target_xy'):
             self._go_find_target_xy = None
+        # Reset visit grid for new episode
+        if hasattr(self, '_visit_count'):
+            self._visit_count.fill(0)
 
     def _line_intersects_circle(self, p1, p2, center, radius):
         """
@@ -2310,6 +2395,53 @@ class GuidedCellSpace(Cell_Space):
             np.float32(avg_vel_dir_x), np.float32(avg_vel_dir_y),
         )
 
+    def has_evacuees_in_guide_perception(self):
+        """Return True if at least one evacuee is within perception_radius of the first guide."""
+        guide_pos = self.get_guide_position()
+        if guide_pos is None:
+            return False
+        r = self.perception_radius
+        gx, gy = float(guide_pos[0]), float(guide_pos[1])
+        for c in self.Cells:
+            for p in c.Particles:
+                if getattr(p, 'is_guide', False):
+                    continue
+                dist = np.sqrt((p.position[0] - gx) ** 2 + (p.position[1] - gy) ** 2)
+                if dist <= r:
+                    return True
+        return False
+
+    def get_visit_pathfinding_direction(self):
+        """
+        When no one in perception: return unit (dx, dy) toward globally least-visited non-blocked cell via A*.
+        Returns (0, 0) if no guide or all cells blocked.
+        """
+        guide_pos = self.get_guide_position()
+        if guide_pos is None:
+            return (0.0, 0.0)
+        best_i, best_j = None, None
+        best_count = np.iinfo(np.int64).max
+        for i in range(self._visit_nx):
+            for j in range(self._visit_ny):
+                if self._visit_blocked[i, j]:
+                    continue
+                if self._visit_count[i, j] < best_count:
+                    best_count = self._visit_count[i, j]
+                    best_i, best_j = i, j
+        if best_i is None:
+            return (0.0, 0.0)
+        wx, wy = self._visit_cell_to_world_center(best_i, best_j)
+        start_xy = (guide_pos[0], guide_pos[1])
+        goal_xy = (wx, wy)
+        path = self._astar_path(start_xy, goal_xy)
+        if not path or len(path) < 2:
+            # Goal unreachable from current position; do not move toward it
+            return (0.0, 0.0)
+        dx = path[1][0] - path[0][0]
+        dy = path[1][1] - path[0][1]
+        n = np.sqrt(dx * dx + dy * dy) + 1e-10
+        return (float(dx / n), float(dy / n))
+
     def _evacuee_centroid_xy(self):
         """Return (cx, cy) centroid of all evacuees (non-guide), or (None, None) if no evacuees."""
         cx, cy, count = 0.0, 0.0, 0
@@ -2324,15 +2456,16 @@ class GuidedCellSpace(Cell_Space):
             return None, None
         return cx / count, cy / count
 
-    def get_guide_state(self, normalize=True, n_particle_norm=100.0):
+    def get_guide_state(self, normalize=True, n_particle_norm=100.0, control_mode=None):
         """
         Get state for the first guide agent.
-        12-dimensional: [dir_to_avg_pos_xy, avg_vel_dir_xy, astar_dir_xy, x_norm, y_norm,
-                        n_remaining_norm, n_escaped_this_step_norm, n_first_guided_this_step_norm, memory_sum_norm].
+        13-dimensional: [dir_to_avg_pos_xy, avg_vel_dir_xy, astar_dir_xy, x_norm, y_norm,
+                        n_remaining_norm, n_escaped_this_step_norm, n_first_guided_this_step_norm, memory_sum_norm, control_mode].
         - First four: within perception_radius, direction to crowd centroid and crowd average velocity unit direction.
         - Next two: A* direction to nearest exit (to compare with crowd movement).
         - Next two: guide's normalized position in the room (x_norm, y_norm in [0,1]).
-        - Last four (for critic): n_remaining/n0, n_escaped_this_step/n0, n_first_guided_this_step/n0, memory_sum/n0.
+        - Next four (for critic): n_remaining/n0, n_escaped_this_step/n0, n_first_guided_this_step/n0, memory_sum/n0.
+        - Last: control_mode (1.0 = using RL, 0.0 = using traditional visit pathfinding). If None, defaults to 1.0.
         Returns None if no guide.
         """
         guide_pos = None
@@ -2374,9 +2507,10 @@ class GuidedCellSpace(Cell_Space):
         n_escaped_norm = np.float32(n_escaped_this_step / n0)
         n_first_guided_norm = np.float32(n_first_guided_this_step / n0)
         memory_sum_norm = np.float32(memory_sum / n0)
+        ctrl = np.float32(1.0 if control_mode is None else (1.0 if control_mode else 0.0))
         return np.array(
             [d1, d2, v1, v2, astar_dx, astar_dy, x_norm, y_norm,
-             n_remaining_norm, n_escaped_norm, n_first_guided_norm, memory_sum_norm],
+             n_remaining_norm, n_escaped_norm, n_first_guided_norm, memory_sum_norm, ctrl],
             dtype=np.float32,
         )
 
@@ -2711,6 +2845,12 @@ class GuidedCellSpace(Cell_Space):
         if self.Number == 0:
             done = True
             return done
+
+        # Record visit: increment visit grid at guide's current position (before moving)
+        guide_pos = self.get_guide_position()
+        if guide_pos is not None and hasattr(self, '_visit_count'):
+            vi, vj = self._world_to_visit_cell(guide_pos[0], guide_pos[1])
+            self._visit_count[vi, vj] += 1
 
         self.Zero_acc()
         # Visibility update is expensive (BFS per cell); do every 5 steps

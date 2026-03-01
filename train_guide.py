@@ -78,12 +78,14 @@ def main():
         return
 
     env = setup_environment(config)
-    state = env.get_guide_state()
+    state = env.get_guide_state(control_mode=1)
     if state is None:
         print("No guide in env. Cannot train.")
         return
     state_dim = state.shape[0]
-    print(f"State dim: {state_dim} (dir_to_avg_pos_xy, avg_vel_dir_xy, astar_dir_xy, x_norm, y_norm, n_remaining_norm, n_escaped_norm, n_first_guided_norm, memory_sum_norm)")
+    print(f"State dim: {state_dim} (dir_to_avg_pos_xy, avg_vel_dir_xy, astar_dir_xy, x_norm, y_norm, n_remaining_norm, n_escaped_norm, n_first_guided_norm, memory_sum_norm, control_mode)")
+    if use_visit_pathfinding_when_alone:
+        print("Visit pathfinding when alone: enabled (guide uses least-visited cell + A* when no evacuees in perception)")
     print("Action: (vx, vy) continuous in [-1, 1]^2")
     print(f"Boundary penalty: {'on' if use_boundary_penalty else 'off'} (scale={guide_boundary_penalty_scale}), Corner penalty: {'on' if use_corner_penalty else 'off'} (scale={guide_corner_penalty_scale})")
 
@@ -122,6 +124,7 @@ def main():
     guide_size = config.get('guide_parameters', {}).get('guide_size', 0.25)
     guide_radius = config.get('guide_parameters', {}).get('guide_radius')
     perception_radius = config.get('guide_parameters', {}).get('perception_radius', 2.5)
+    use_visit_pathfinding_when_alone = config.get('guide_parameters', {}).get('use_visit_pathfinding_when_alone', False)
 
     conformal_every_n = int(value_conformal_cfg.get('every_n_episodes', 0)) if do_value_conformal else 0
 
@@ -173,20 +176,34 @@ def main():
                 )
             )
 
+        use_visit_when_alone = config.get('guide_parameters', {}).get('use_visit_pathfinding_when_alone', False)
+
         def _run_episode_trajectory(env, deterministic):
             start_pos = env.get_guide_position()
             traj = []
-            s = env.get_guide_state()
+            has_evacuee = env.has_evacuees_in_guide_perception()
+            use_scripted = (not has_evacuee) and use_visit_when_alone
+            s = env.get_guide_state(control_mode=0 if use_scripted else 1)
             if s is None:
                 return traj, start_pos
             for _ in range(steps_per_episode):
-                a = agent.get_action(s, deterministic=deterministic)
+                has_evacuee = env.has_evacuees_in_guide_perception()
+                use_scripted = (not has_evacuee) and use_visit_when_alone
+                s = env.get_guide_state(control_mode=0 if use_scripted else 1)
+                if s is None:
+                    break
+                if use_scripted:
+                    dx, dy = env.get_visit_pathfinding_direction()
+                    a = np.array([dx, dy], dtype=np.float32)
+                    a = np.clip(a, -1.0, 1.0)
+                else:
+                    a = agent.get_action(s, deterministic=deterministic)
                 guide_actions = [[float(a[0]), float(a[1])]]
                 done = env.step_guided(guide_actions=guide_actions, max_guide_speed=max_guide_speed)
                 r = _reward_fn(env)
                 pos = env.get_guide_position()
                 traj.append((s.copy(), r, pos))
-                s_next = env.get_guide_state()
+                s_next = env.get_guide_state(control_mode=1)
                 s = s_next if s_next is not None else s
                 if done:
                     break
@@ -300,15 +317,25 @@ def main():
         # Exploration noise decays per episode (so later episodes are more exploitative)
         noise_std = exploration_noise_std * (exploration_decay ** ep)
         for step in range(steps_per_episode):
-            a = agent.get_action(s, deterministic=False)
-            # Add Gaussian exploration noise on (vx, vy)
-            a = a + noise_std * np.random.randn(2)
-            a[0] = np.clip(a[0], -1.0, 1.0)
-            a[1] = np.clip(a[1], -1.0, 1.0)
+            has_evacuee = env.has_evacuees_in_guide_perception()
+            use_scripted = (not has_evacuee) and use_visit_pathfinding_when_alone
+            control_mode = 0 if use_scripted else 1
+            s = env.get_guide_state(control_mode=control_mode)
+            if s is None:
+                break
+            if use_scripted:
+                dx, dy = env.get_visit_pathfinding_direction()
+                a = np.array([dx, dy], dtype=np.float32)
+                a = np.clip(a, -1.0, 1.0)
+            else:
+                a = agent.get_action(s, deterministic=False)
+                a = a + noise_std * np.random.randn(2)
+                a[0] = np.clip(a[0], -1.0, 1.0)
+                a[1] = np.clip(a[1], -1.0, 1.0)
 
             guide_actions = [[float(a[0]), float(a[1])]]
             done = env.step_guided(guide_actions=guide_actions, max_guide_speed=max_guide_speed)
-            s_next = env.get_guide_state()
+            s_next = env.get_guide_state(control_mode=1)
             r = (
                 - env.get_guide_boundary_penalty(
                     margin=guide_boundary_margin,
@@ -326,10 +353,10 @@ def main():
 
             s_next_valid = s_next if s_next is not None else s
 
-            # On-policy learning: update immediately with current experience
-            # Reward and state transitions are always consistent with current policy
-            agent.update(s, a, r, s_next_valid, done=done)
-            
+            # On-policy learning: only update when we used RL (not scripted pathfinding)
+            if not use_scripted:
+                agent.update(s, a, r, s_next_valid, done=done)
+
             if s_next is not None:
                 s = s_next
             if done:

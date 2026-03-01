@@ -116,7 +116,10 @@ def setup_environment(config):
         memory_decay_rate=config['guide_parameters'].get('memory_decay_rate', 0.2),
         memory_astar_thres_around=config['guide_parameters'].get('memory_astar_thres_around', 0.3),
         memory_astar_thres_out=config['guide_parameters'].get('memory_astar_thres_out', 0.2),
-        memory_astar_update_interval_n=config['guide_parameters'].get('memory_astar_update_interval_n', 5)
+        memory_astar_update_interval_n=config['guide_parameters'].get('memory_astar_update_interval_n', 5),
+        visit_grid_norm_x=config['guide_parameters'].get('visit_grid_norm_x', 0.1),
+        visit_grid_norm_y=config['guide_parameters'].get('visit_grid_norm_y', 0.1),
+        use_visit_pathfinding_when_alone=config['guide_parameters'].get('use_visit_pathfinding_when_alone', False)
     )
     
     print(f"\nEnvironment created:")
