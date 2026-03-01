@@ -32,7 +32,7 @@ class ConformalValue:
         Args:
             calibration_trajectories: List of episodes. Each episode is a list of
                 (state, extras, reward) tuples: [(s_0, e_0, r_0), (s_1, e_1, r_1), ...].
-                extras are the 4-dim critic extras (n_escaped_norm, n_first_guided_norm, memory_sum_norm, control_mode).
+                extras are the 6-dim critic extras (n_escaped_norm, n_first_guided_norm, memory_sum_norm, control_mode, n_remaining_norm, effective_speed).
             alpha: Miscoverage level (target coverage is 1 - alpha, e.g. alpha=0.1 -> 90%).
 
         Returns:
@@ -71,19 +71,19 @@ class ConformalValue:
         self._n_calibration = n
         return self
 
-    def interval(self, s):
+    def interval(self, s, extras):
         """
         Prediction interval for value at state s.
-        Returns (lower, upper) or None if not calibrated.
+        extras: 6-dim array (env 5 + effective_speed). Returns (lower, upper) or None if not calibrated.
         """
         if self._quantile is None:
             return None
-        v = self.agent.get_value(s)
+        v = self.agent.get_value(s, extras)
         return (v - self._quantile, v + self._quantile)
 
-    def predict(self, s):
-        """Point prediction V(s)."""
-        return self.agent.get_value(s)
+    def predict(self, s, extras):
+        """Point prediction V(s). extras: 5-dim critic extras."""
+        return self.agent.get_value(s, extras)
 
     @property
     def quantile(self):

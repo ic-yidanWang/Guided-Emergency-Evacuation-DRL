@@ -43,6 +43,8 @@ def main():
     do_visualize = train_cfg.get('visualize', True) and not args.no_viz
     refresh_interval = int(train_cfg.get('refresh_interval', 10))
     max_guide_speed = float(train_cfg.get('max_guide_speed', 2.0))
+    guide_speed_limit = float(train_cfg.get('guide_speed_limit', 1.6))
+    guide_speed_over_penalty_scale = float(train_cfg.get('guide_speed_over_penalty_scale', 0.0))
     guide_boundary_margin = float(train_cfg.get('guide_boundary_margin', 0.8))
     use_boundary_penalty = train_cfg.get('use_boundary_penalty', True)
     use_corner_penalty = train_cfg.get('use_corner_penalty', True)
@@ -52,6 +54,9 @@ def main():
     memory_step_reward_scale = float(train_cfg.get('memory_step_reward_scale', 0.01))
     memory_first_reward_scale = float(train_cfg.get('memory_first_reward_scale', 0.1))
     memory_exit_reward_scale = float(train_cfg.get('memory_exit_reward_scale', 0.05))
+    last_escape_bonus_ratio = float(train_cfg.get('last_escape_bonus_ratio', 0.1))
+    last_escape_bonus_initial_reward = float(train_cfg.get('last_escape_bonus_initial_reward', 1.0))
+    last_escape_bonus_final_scale = float(train_cfg.get('last_escape_bonus_final_scale', 10.0))
     episodes = int(train_cfg.get('episodes', 50))
     steps_per_episode = int(train_cfg.get('steps_per_episode', 200))
     save_model = train_cfg.get('save_model', False)
@@ -70,6 +75,8 @@ def main():
     min_lr_ratio = float(train_cfg.get('min_lr_ratio', 0.1))
     exploration_noise_std = float(train_cfg.get('exploration_noise_std', 0.25))
     exploration_decay = float(train_cfg.get('exploration_decay', 0.995))
+    noise_warmup_episodes = int(train_cfg.get('noise_warmup_episodes', 0))
+    noise_warmup_ini_ratio = float(train_cfg.get('noise_warmup_ini_ratio', 0.0))
     use_visit_pathfinding_when_alone = config.get('guide_parameters', {}).get('use_visit_pathfinding_when_alone', False)
     # Using on-policy learning: update immediately with current policy's experiences
     # This ensures reward and state transitions are always consistent with the current policy
@@ -84,7 +91,7 @@ def main():
         print("No guide in env. Cannot train.")
         return
     state_dim = state.shape[0]
-    print(f"State dim: {state_dim} (dir_cos, dir_sin, vel_cos, vel_sin, dist_to_centroid_norm, astar_cos, astar_sin, x_norm, y_norm, n_remaining_norm); critic extras: 4 (n_escaped_norm, n_first_guided_norm, memory_sum_norm, control_mode)")
+    print(f"State dim: {state_dim}; critic extras: 6 (n_escaped, n_first_guided, memory_sum, control_mode, n_remaining_norm, effective_speed); speed limit (world): {guide_speed_limit}")
     if use_visit_pathfinding_when_alone:
         print("Visit pathfinding when alone: enabled (guide uses least-visited cell + A* when no evacuees in perception)")
     print("Action: (vx, vy) continuous in [-1, 1]^2")
@@ -94,7 +101,7 @@ def main():
     agent = ActorCritic(
         state_dim=state_dim,
         action_dim=2,
-        critic_extra_dim=4,
+        critic_extra_dim=6,
         hidden_sizes=(64, 64),
         lr_actor=lr_actor,
         lr_critic=lr_critic,
@@ -135,6 +142,8 @@ def main():
         steps_per_episode, gamma,
         obstacle_configs, domain,
         memory_step_reward_scale, memory_first_reward_scale, memory_exit_reward_scale,
+        last_escape_bonus_ratio, last_escape_bonus_initial_reward, last_escape_bonus_final_scale,
+        guide_speed_limit, guide_speed_over_penalty_scale,
     ):
         """Run conformal snapshot. Always draw in a headless Figure and save to file (no main window)."""
         from matplotlib.figure import Figure
@@ -162,8 +171,8 @@ def main():
                 np.random.set_state(saved_np_state)
                 torch.set_rng_state(saved_torch_state)
 
-        def _reward_fn(env):
-            return (
+        def _reward_fn(env, a=None):
+            r = (
                 - env.get_guide_boundary_penalty(
                     margin=guide_boundary_margin,
                     penalty_scale=guide_boundary_penalty_scale,
@@ -175,7 +184,17 @@ def main():
                     first_scale=memory_first_reward_scale,
                     exit_scale=memory_exit_reward_scale,
                 )
+                + env.get_guide_last_escape_bonus_reward(
+                    last_ratio=last_escape_bonus_ratio,
+                    initial_reward=last_escape_bonus_initial_reward,
+                    final_scale=last_escape_bonus_final_scale,
+                )
             )
+            if a is not None and guide_speed_over_penalty_scale > 0:
+                eff_speed = float(np.linalg.norm(a)) * max_guide_speed
+                speed_over = max(0.0, eff_speed - guide_speed_limit)
+                r -= guide_speed_over_penalty_scale * speed_over
+            return r
 
         use_visit_when_alone = config.get('guide_parameters', {}).get('use_visit_pathfinding_when_alone', False)
 
@@ -194,16 +213,18 @@ def main():
                 s = env.get_guide_state()
                 if s is None:
                     break
-                extras = env.get_guide_critic_extras(control_mode=control_mode)
+                env_extras = env.get_guide_critic_extras(control_mode=control_mode)
                 if use_scripted:
                     dx, dy = env.get_visit_pathfinding_direction()
                     a = np.array([dx, dy], dtype=np.float32)
                     a = np.clip(a, -1.0, 1.0)
                 else:
                     a = agent.get_action(s, deterministic=deterministic)
+                effective_speed = float(np.linalg.norm(a)) * max_guide_speed
+                extras = np.concatenate([env_extras, [np.float32(effective_speed)]])
                 guide_actions = [[float(a[0]), float(a[1])]]
                 done = env.step_guided(guide_actions=guide_actions, max_guide_speed=max_guide_speed)
-                r = _reward_fn(env)
+                r = _reward_fn(env, a=a if not use_scripted else None)
                 pos = env.get_guide_position()
                 traj.append((s.copy(), extras.copy(), r, pos))
                 s_next = env.get_guide_state()
@@ -317,8 +338,14 @@ def main():
         if s is None:
             continue
 
-        # Exploration noise decays per episode (so later episodes are more exploitative)
-        noise_std = exploration_noise_std * (exploration_decay ** ep)
+        # Exploration noise: warmup for first N episodes (ini_ratio -> 1.0), then decay
+        if noise_warmup_episodes > 0 and ep < noise_warmup_episodes:
+            t = ep / max(1, noise_warmup_episodes)
+            mult = noise_warmup_ini_ratio + (1.0 - noise_warmup_ini_ratio) * t
+            noise_std = exploration_noise_std * mult
+        else:
+            ep_since_warmup = max(0, ep - noise_warmup_episodes)
+            noise_std = exploration_noise_std * (exploration_decay ** ep_since_warmup)
         for step in range(steps_per_episode):
             has_evacuee = env.has_evacuees_in_guide_perception()
             use_scripted = (not has_evacuee) and use_visit_pathfinding_when_alone
@@ -326,7 +353,7 @@ def main():
             s = env.get_guide_state()
             if s is None:
                 break
-            extras = env.get_guide_critic_extras(control_mode=control_mode)
+            env_extras = env.get_guide_critic_extras(control_mode=control_mode)
             if use_scripted:
                 dx, dy = env.get_visit_pathfinding_direction()
                 a = np.array([dx, dy], dtype=np.float32)
@@ -337,10 +364,21 @@ def main():
                 a[0] = np.clip(a[0], -1.0, 1.0)
                 a[1] = np.clip(a[1], -1.0, 1.0)
 
+            effective_speed = float(np.linalg.norm(a)) * max_guide_speed
+            extras = np.concatenate([env_extras, [np.float32(effective_speed)]])
+
+            # Penalty when effective speed (norm(a)*max_guide_speed) exceeds limit (RL steps only)
+            speed_over = max(0.0, effective_speed - guide_speed_limit)
+            speed_penalty = -guide_speed_over_penalty_scale * speed_over
+
             guide_actions = [[float(a[0]), float(a[1])]]
             done = env.step_guided(guide_actions=guide_actions, max_guide_speed=max_guide_speed)
             s_next = env.get_guide_state()
-            extras_next = env.get_guide_critic_extras(control_mode=1)
+            env_extras_next = env.get_guide_critic_extras(control_mode=1)
+            a_next = agent.get_action(s_next, deterministic=True) if s_next is not None else a
+            effective_speed_next = float(np.linalg.norm(a_next)) * max_guide_speed
+            extras_next = np.concatenate([env_extras_next, [np.float32(effective_speed_next)]])
+
             r = (
                 - env.get_guide_boundary_penalty(
                     margin=guide_boundary_margin,
@@ -353,6 +391,12 @@ def main():
                     first_scale=memory_first_reward_scale,
                     exit_scale=memory_exit_reward_scale,
                 )
+                + env.get_guide_last_escape_bonus_reward(
+                    last_ratio=last_escape_bonus_ratio,
+                    initial_reward=last_escape_bonus_initial_reward,
+                    final_scale=last_escape_bonus_final_scale,
+                )
+                + (speed_penalty if not use_scripted else 0.0)
             )
             ep_reward += r
 
@@ -419,6 +463,11 @@ def main():
                 memory_step_reward_scale=memory_step_reward_scale,
                 memory_first_reward_scale=memory_first_reward_scale,
                 memory_exit_reward_scale=memory_exit_reward_scale,
+                last_escape_bonus_ratio=last_escape_bonus_ratio,
+                last_escape_bonus_initial_reward=last_escape_bonus_initial_reward,
+                last_escape_bonus_final_scale=last_escape_bonus_final_scale,
+                guide_speed_limit=guide_speed_limit,
+                guide_speed_over_penalty_scale=guide_speed_over_penalty_scale,
             )
 
         # LR scheduler step (per episode)
@@ -482,6 +531,11 @@ def main():
                 memory_step_reward_scale=memory_step_reward_scale,
                 memory_first_reward_scale=memory_first_reward_scale,
                 memory_exit_reward_scale=memory_exit_reward_scale,
+                last_escape_bonus_ratio=last_escape_bonus_ratio,
+                last_escape_bonus_initial_reward=last_escape_bonus_initial_reward,
+                last_escape_bonus_final_scale=last_escape_bonus_final_scale,
+                guide_speed_limit=guide_speed_limit,
+                guide_speed_over_penalty_scale=guide_speed_over_penalty_scale,
             )
 
 

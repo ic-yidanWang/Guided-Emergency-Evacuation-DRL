@@ -163,7 +163,7 @@ class ActorCritic(nn.Module):
         self,
         state_dim,
         action_dim=2,
-        critic_extra_dim=4,
+        critic_extra_dim=6,
         hidden_sizes=(64, 64),
         lr_actor=3e-4,
         lr_critic=1e-3,
@@ -198,7 +198,7 @@ class ActorCritic(nn.Module):
         return self.actor.get_action(s, deterministic=deterministic)
 
     def get_value(self, s, extras):
-        """V(s) = Q(s, extras, π(s)): value at s under current policy (for conformal / display). extras: (4,) array."""
+        """V(s) = Q(s, extras, π(s)): value at s under current policy (for conformal / display). extras: (6,) array (env 5 + effective_speed)."""
         if isinstance(s, np.ndarray):
             s = torch.from_numpy(s).float().unsqueeze(0)
         if isinstance(extras, np.ndarray):

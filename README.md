@@ -218,7 +218,7 @@ Emergency-evacuation-Deep-reinforcement-learning/
 - ✅ Framework implemented
 - ✅ Stationary guides working
 - ✅ Mobile guide RL training (Actor-Critic) in `train_guide.py`
-- ✅ 10D state (dir_cos/sin, vel_cos/sin, dist_to_centroid_norm, astar_cos/sin, x_norm, y_norm, n_remaining_norm) + 4 critic extras (n_escaped_norm, n_first_guided_norm, memory_sum_norm, control_mode) and reward design documented in README
+- ✅ 8D state + 6 critic extras (n_remaining_norm only to critic) (..., control_mode, effective_speed=‖a‖×max_guide_speed); guide speed limit (world units) and over-limit penalty in config
 
 **Files:**
 
@@ -480,40 +480,41 @@ Guide agents (stationary or mobile) help direct evacuees:
 
 The mobile guide is trained with **Actor-Critic** (continuous action). The following design keeps the reward and state consistent and learnable.
 
-### Guide State (10 dimensions, 0-9) and Critic Extras (4 dimensions, 10-13)
+### Guide State (8 dimensions, 0-7) and Critic Extras (6 dimensions, 8-13)
 
-The **state** (actor input) is **10-dimensional**: (1) from a **circular perception range** (`perception_radius`), the **direction to the crowd centroid** and **crowd average velocity direction** as **(cos, sin)** of their angles, plus **distance from guide to crowd centroid** normalized by perception_radius [0, 1]; (2) the **A** direction to the nearest exit (to compare with crowd movement); (3) the **guide’s normalized position** in the room (`x_norm`, `y_norm` in [0, 1]); (4) **scalars for critic** (all normalized by initial particle count): **remaining evacuee count**, **number escaped this step**, **number first-guided this step**, and **sum of evacuees’ memory strength** (global progress and guide-impact signals); (5) **control_mode**: 1.0 when using RL policy, 0.0 when using scripted visit-based pathfinding (see below).
-
+The **state** (actor input) is **8-dimensional**: (1) **(dir_x, dir_y)** = vector from guide to crowd centroid, magnitude = min(1, distance/perception_radius); (2) **(vel_cos, vel_sin)** = crowd average velocity direction (unit vector); (3) **(astar_cos, astar_sin)** = A* direction to nearest exit; (4) **(x_norm, y_norm)** = guide position in [0, 1]. **n_remaining_norm** is only in critic extras, not in state. Critic extras (indices 8–13): n_escaped_norm, n_first_guided_norm, memory_sum_norm, control_mode, n_remaining_norm, effective_speed.
 
 | Index | Name                    | Range / Type      | Reason                                                                                                                           |
 | ----- | ----------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| 0     | `dir_cos`               | cos(θ)            | Cos of angle from guide to crowd centroid in perception range.                                                                   |
-| 1     | `dir_sin`               | sin(θ)            | Sin of angle from guide to crowd centroid.                                                                                       |
+| 0     | `dir_x`                 | [-1, 1]           | x of vector guide to centroid; magnitude = min(1, dist/perception_radius). 0 when no evacuees.                                    |
+| 1     | `dir_y`                 | [-1, 1]           | y; direction and distance in one 2D vector.                                                                                      |
 | 2     | `vel_cos`               | cos(φ)            | Cos of angle of crowd average velocity direction.                                                                                |
 | 3     | `vel_sin`               | sin(φ)            | Sin of angle of crowd average velocity direction.                                                                                |
-| 4     | `dist_to_centroid_norm` | [0, 1]            | Distance from guide to crowd centroid, normalized by perception_radius (0 when no evacuees in range).                            |
-| 5     | `astar_cos`             | cos(ψ)            | Cos of angle of A* direction to nearest exit.                                                                                    |
-| 6     | `astar_sin`             | sin(ψ)            | Sin of angle of A* direction to nearest exit.                                                                                    |
-| 7     | `x_norm`                | [0, 1]            | Guide’s x-position in the room, normalized by domain bounds. So the guide knows its rough location (e.g. near left/right walls). |
-| 8     | `y_norm`                | [0, 1]            | Same for y. Together with `x_norm`, gives the guide’s global position in the room.                                               |
-| 9     | `n_remaining_norm`      | [0, 1]            | Remaining evacuee count / initial count. Tells the critic how many people are still in the room.                                 |
-| 10    | `n_escaped_norm`        | [0, 1]            | Number of evacuees who exited this step / initial count. One-step escape progress.                                               |
-| 11    | `n_first_guided_norm`   | [0, 1]            | Number of evacuees first guided this step / initial count. Guide-impact signal.                                                  |
-| 12    | `memory_sum_norm`       | [0, ∞) normalized | Sum of evacuees’ memory strength / initial count. How much “learned route” the crowd carries.                                    |
-| 13    | `control_mode`          | 0.0 or 1.0        | 1.0 = RL policy in control; 0.0 = scripted visit-based pathfinding (when alone and `use_visit_pathfinding_when_alone` is true).  |
+| 4     | `astar_cos`             | cos(psi)          | Cos of angle of A* direction to nearest exit.                                                                                   |
+| 5     | `astar_sin`             | sin(psi)          | Sin of angle of A* direction to nearest exit.                                                                                    |
+| 6     | `x_norm`                | [0, 1]            | Guide x-position normalized by domain bounds.                                                                                    |
+| 7     | `y_norm`                | [0, 1]            | Same for y.                                                                                                                     |
+| 8     | `n_escaped_norm`        | [0, 1]            | Evacuees exited this step / initial count. (Critic extra.)                                                                      |
+| 9     | `n_first_guided_norm`   | [0, 1]            | First-guided this step / initial count. (Critic extra.)                                                                         |
+| 10    | `memory_sum_norm`       | [0, inf) normalized | Sum of evacuees’ memory strength / initial count. How much “learned route” the crowd carries.                                    |
+| 11    | `control_mode`          | 0.0 or 1.0        | 1.0 = RL; 0.0 = scripted. (Critic extra.)                                                                                      |
+| 12    | `n_remaining_norm`      | [0, 1]            | Remaining evacuee count / initial count. (Critic extra only.)                                                                   |
+| 13    | `effective_speed`       | [0, inf) world u. | norm(a)*max_guide_speed. (Critic extra.)                                                                                         |
 
 
-The **state** (actor input) is only indices 0–9. Indices 10–13 are **critic extras**, passed via `get_guide_critic_extras(control_mode)` and not part of the state vector.
+The **state** (actor input) is only indices 0–7. Indices 8–13 are **critic extras**: the first five from `get_guide_critic_extras(control_mode)` (includes n_remaining_norm), the sixth is **effective_speed**, concatenated when calling the critic.
 
-When no evacuees are in the perception range, the first five components (dir_cos, dir_sin, vel_cos, vel_sin, dist_to_centroid_norm) are 0. When there are no exits, components 5–6 are 0. The perception radius is configured in `config/simulation_config.json` under `guide_parameters.perception_radius`.
+When no evacuees are in the perception range, the first four components (dir_x, dir_y, vel_cos, vel_sin) are 0. When there are no exits, components 4–5 (astar) are 0. n_remaining_norm is only in critic extras. The perception radius is configured in `config/simulation_config.json` under `guide_parameters.perception_radius`.
 
-**Critic input:** The critic is **Q(s, extras, a)**. Its input is **state s** (10 dims), **extras** (4 dims from `get_guide_critic_extras(control_mode)`), and **action a** = (vx, vy). So the critic network input dimension is **10 + 4 + 2 = 16**. The interface `get_value(s, extras)` used for Conformal and plots returns **Q(s, extras, π(s))** (the value of the current policy at state s with extras).
+**Critic input:** The critic is **Q(s, extras, a)**. Its input is **state s** (8 dims), **extras** (6 dims), and **action a** = (vx, vy). So the critic network input dimension is **8 + 6 + 2 = 16**. The interface `get_value(s, extras)` used for Conformal and plots returns **Q(s, extras, π(s))** (the value of the current policy at state s with extras).
 
 State is computed in `evacuation_rl/environments/cellspace.py` via `get_guide_state()` and `_get_evacuees_perception_state()`; extras via `get_guide_critic_extras(control_mode)`.
 
-### Guide Reward (per step)
+### Episode end and Guide Reward (per step)
 
-Total reward is the sum of the following:
+An **episode ends** when **all non-guide particles have escaped** (no evacuees left in the room).
+
+Total reward per step is the sum of the following:
 
 
 | Term                            | Formula / Behavior                                                       | Reason                                                                                                                                                        |
@@ -523,9 +524,12 @@ Total reward is the sum of the following:
 | **Memory reward (continuous)**  | `+get_guide_memory_reward(step_scale=...)`                               | 当 evacuee 的 `memory_strength > 0` 时，每步按照 memory_strength 给 guide 少量正奖励，鼓励在给出明确路线后，人群沿着记忆路线前进。                                                                 |
 | **Memory-first reward (bonus)** | `+get_guide_memory_reward(first_scale=...)`                              | evacuee 第一次在 guide 附近获得明确 A* 路线时，按 memory_strength 给一次性较大正奖励，鼓励 guide 主动“教路”。                                                                                 |
 | **Memory-exit reward**          | `+get_guide_memory_reward(exit_scale=...)`                               | evacuee 成功从出口离开时，按照其离开前的 memory_strength 给 guide 一点正奖励，体现“成功带出一批记得路的人”。                                                                                       |
+| **Speed-over penalty**          | `-guide_speed_over_penalty_scale × max(0, effective_speed − guide_speed_limit)`，其中 effective_speed = ‖a‖ × max_guide_speed | 当「actor 输出 × max_guide_speed」的有效速度超过 `guide_speed_limit`（世界单位）时施加惩罚；仅在使用 RL 的步生效。                                                                 |
 
 
-Config for training (e.g. scales, margin, threshold) is under `config/simulation_config.json` → `train`.
+Guide movement speed is capped by `max_guide_speed` in simulation; **effective speed** (‖a‖ × max_guide_speed) is penalized when it exceeds `guide_speed_limit` (config: `train.guide_speed_limit`, `train.guide_speed_over_penalty_scale`). Actor learns its own threshold from the penalty.
+
+Config for training (e.g. scales, margin, threshold) is under `config/simulation_config.json` → `train`. Exploration noise supports a **warmup**: `noise_warmup_episodes` (e.g. 50) and `noise_warmup_ini_ratio` (e.g. 0). For the first N episodes, noise scales linearly from `exploration_noise_std * noise_warmup_ini_ratio` to `exploration_noise_std`; after that, noise decays by `exploration_decay` per episode.
 
 ### Visit-based pathfinding when alone
 
