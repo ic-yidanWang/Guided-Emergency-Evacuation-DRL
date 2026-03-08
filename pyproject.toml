@@ -9,3 +9,12 @@ dependencies = [
     "numpy>=1.21.0",
     "matplotlib>=3.5.0",
 ]
+
+[tool.uv.sources]
+    torch = [{index="torch-cu126"}]
+
+
+[[tool.uv.index]]
+name = "torch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
